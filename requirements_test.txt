@@ -1,0 +1,18 @@
+# Testing dependencies for Schluter DITRA-HEAT integration
+
+# Required for running the API client
+aiohttp>=3.8.0
+
+# Required for testing
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+pytest-aiohttp>=1.0.0
+pytest-cov>=4.0.0
+
+# Required for mocking
+aioresponses>=0.7.0
+
+# Code quality
+black>=23.0.0
+pylint>=2.0.0
+mypy>=1.0.0

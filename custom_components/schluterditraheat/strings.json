@@ -1,0 +1,31 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Schluter DITRA-HEAT",
+        "description": "Enter your schluterditraheat.com credentials to connect your thermostats to Home Assistant.",
+        "data": {
+          "username": "Email Address",
+          "password": "Password"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate Schluter DITRA-HEAT",
+        "description": "Your session has expired. Please enter your password to re-authenticate.",
+        "data": {
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to Schluter service. Please check your internet connection.",
+      "invalid_auth": "Invalid email address or password. Please try again.",
+      "rate_limit": "Too many login attempts. Please wait a few minutes and try again.",
+      "unknown": "An unexpected error occurred. Please try again later."
+    },
+    "abort": {
+      "already_configured": "This account is already configured in Home Assistant.",
+      "reauth_successful": "Re-authentication successful."
+    }
+  }
+}
