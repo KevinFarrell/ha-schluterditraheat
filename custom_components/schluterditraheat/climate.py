@@ -150,9 +150,7 @@ class SchluterThermostat(CoordinatorEntity[SchluterDataUpdateCoordinator], Clima
             ATTR_IDENTIFIER: thermostat.get("identifier"),
             ATTR_LOCATION_NAME: thermostat.get("location_name"),
             ATTR_GROUP_NAME: thermostat.get("group_name"),
-            "heating_percent": thermostat.get("heating_percent"),
             "air_floor_mode": thermostat.get("air_floor_mode"),
-            "gfci_status": thermostat.get("gfci_status"),
         }
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
