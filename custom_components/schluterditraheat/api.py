@@ -46,6 +46,7 @@ class SchluterApi:
         self._refresh_token: str | None = None
         self._account_id: int | None = None
         self._user_format: dict[str, str] = {}
+        self._auth_lock = asyncio.Lock()
 
     async def authenticate(self) -> None:
         """Authenticate with the Schluter API."""
@@ -94,15 +95,39 @@ class SchluterApi:
         except aiohttp.ClientError as err:
             raise SchluterConnectionError(f"Connection error: {err}") from err
 
+    async def _reauthenticate(self) -> None:
+        """Re-authenticate after session expiry.
+
+        Acquires an auth lock to prevent concurrent re-authentication from
+        multiple simultaneous 401 responses.
+        """
+        async with self._auth_lock:
+            _LOGGER.debug("Session expired, re-authenticating")
+            try:
+                await self.authenticate()
+            except SchluterApiError as err:
+                raise SchluterAuthenticationError(
+                    "Re-authentication failed after session expiry"
+                ) from err
+
     async def _request(
         self,
         method: str,
         endpoint: str,
+        *,
+        _retry_auth: bool = True,
         **kwargs: Any,
     ) -> dict[str, Any] | list[dict[str, Any]]:
-        """Make an authenticated API request."""
+        """Make an authenticated API request.
+
+        On 401/403 responses, automatically re-authenticates and retries once.
+        Set _retry_auth=False to disable retry (used internally to prevent loops).
+        """
         if not self._session_id:
             raise SchluterAuthenticationError("Not authenticated")
+
+        # Defensive copy to avoid mutation on retry (headers are popped)
+        kwargs = dict(kwargs)
 
         url = f"{API_BASE_URL}{endpoint}"
 
@@ -123,7 +148,12 @@ class SchluterApi:
                 async with self._session.request(
                     method, url, headers=headers, cookies=cookies, **kwargs
                 ) as resp:
-                    if resp.status == 401 or resp.status == 403:
+                    if resp.status in (401, 403):
+                        if _retry_auth:
+                            await self._reauthenticate()
+                            return await self._request(
+                                method, endpoint, _retry_auth=False, **kwargs
+                            )
                         raise SchluterAuthenticationError("Session expired or invalid")
                     if resp.status == 429:
                         raise SchluterRateLimitError("Rate limit exceeded")
