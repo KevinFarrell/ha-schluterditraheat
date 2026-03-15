@@ -89,6 +89,9 @@ sys.modules["homeassistant.components.binary_sensor"].BinarySensorEntity = (
 sys.modules["homeassistant.components.climate"].ClimateEntity = _ClimateEntity
 sys.modules["homeassistant.components.sensor"].SensorEntity = _SensorEntity
 
+# HA constants used at runtime (not just type annotations)
+sys.modules["homeassistant.const"].ATTR_TEMPERATURE = "temperature"
+
 # Add the repo root so `custom_components.schluterditraheat` is importable.
 _SRC_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_SRC_DIR))
