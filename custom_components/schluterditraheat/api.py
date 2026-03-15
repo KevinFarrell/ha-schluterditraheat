@@ -275,47 +275,34 @@ class SchluterApi:
         """
         await self.set_device_attribute(device_id, "setpointMode", mode)
 
-    async def get_all_thermostats(self) -> list[dict[str, Any]]:
-        """Get all thermostats with their current state.
+    async def get_static_data(self) -> dict[int, dict[str, Any]]:
+        """Get static metadata for all devices.
 
-        Returns a list of thermostat dictionaries with combined data from
-        locations, devices, groups, and attributes.
+        Fetches locations, devices, and groups, returning a dict keyed by
+        device_id with static fields that rarely change (identifier, name,
+        location, group, sku, vendor).
         """
-        thermostats = []
+        result: dict[int, dict[str, Any]] = {}
 
-        # Get all locations
         locations = await self.get_locations()
 
         for location in locations:
             location_id = location["id"]
             location_name = location["name"]
 
-            # Get devices for this location
             devices = await self.get_devices(location_id)
-
-            # Get groups (rooms) for this location
             groups = await self.get_groups(location_id)
             groups_by_id = {g["id"]: g for g in groups}
 
-            # Get attributes for each device
             for device in devices:
                 device_id = device["id"]
                 group_id = device.get("group$id")
 
-                # Get current attributes
-                try:
-                    attributes = await self.get_device_attributes(device_id)
-                except SchluterApiError as err:
-                    _LOGGER.error("Failed to get attributes for device %s: %s", device_id, err)
-                    continue
-
-                # Find the room name
                 group_name = None
                 if group_id and group_id in groups_by_id:
                     group_name = groups_by_id[group_id]["name"]
 
-                # Combine all data
-                thermostat = {
+                result[device_id] = {
                     "device_id": device_id,
                     "identifier": device["identifier"],
                     "name": device.get("name", f"Thermostat {device_id}"),
@@ -325,16 +312,63 @@ class SchluterApi:
                     "group_name": group_name,
                     "sku": device.get("sku"),
                     "vendor": device.get("vendor", "Schluter"),
-                    # Current state from attributes
-                    "current_temperature": attributes.get("roomTemperatureDisplay", {}).get("value"),
-                    "target_temperature": attributes.get("roomSetpoint"),
-                    "mode": attributes.get("setpointMode"),
-                    "heating_percent": attributes.get("outputPercentDisplay", {}).get("percent", 0),
-                    "air_floor_mode": attributes.get("airFloorMode"),
-                    "gfci_status": attributes.get("gfciStatus"),
                 }
 
-                thermostats.append(thermostat)
+        return result
+
+    async def get_device_attributes_bulk(
+        self, device_ids: list[int]
+    ) -> dict[int, dict[str, Any]]:
+        """Fetch and parse attributes for multiple devices.
+
+        Fetches attributes for each device sequentially (rate-limit safe).
+        Devices that fail are logged and skipped — does not raise.
+
+        Returns a dict keyed by device_id with parsed attribute values matching
+        the keys that climate.py expects.
+        """
+        result: dict[int, dict[str, Any]] = {}
+
+        for device_id in device_ids:
+            try:
+                raw = await self.get_device_attributes(device_id)
+            except SchluterApiError as err:
+                _LOGGER.error(
+                    "Failed to get attributes for device %s: %s", device_id, err
+                )
+                continue
+
+            result[device_id] = {
+                "current_temperature": raw.get(
+                    "roomTemperatureDisplay", {}
+                ).get("value"),
+                "target_temperature": raw.get("roomSetpoint"),
+                "mode": raw.get("setpointMode"),
+                "heating_percent": raw.get(
+                    "outputPercentDisplay", {}
+                ).get("percent", 0),
+                "air_floor_mode": raw.get("airFloorMode"),
+                "gfci_status": raw.get("gfciStatus"),
+            }
+
+        return result
+
+    async def get_all_thermostats(self) -> list[dict[str, Any]]:
+        """Get all thermostats with their current state.
+
+        Returns a list of thermostat dictionaries with combined data from
+        locations, devices, groups, and attributes. Same return shape as
+        before — delegates to get_static_data() + get_device_attributes_bulk().
+        """
+        static_data = await self.get_static_data()
+        dynamic_data = await self.get_device_attributes_bulk(list(static_data.keys()))
+
+        thermostats = []
+        for device_id, static in static_data.items():
+            if device_id not in dynamic_data:
+                continue
+            thermostat = {**static, **dynamic_data[device_id]}
+            thermostats.append(thermostat)
 
         return thermostats
 
