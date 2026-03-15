@@ -126,8 +126,9 @@ class SchluterApi:
         if not self._session_id:
             raise SchluterAuthenticationError("Not authenticated")
 
-        # Defensive copy to avoid mutation on retry (headers are popped)
-        kwargs = dict(kwargs)
+        # Copy kwargs before mutating (headers are popped) so retries see the original
+        if _retry_auth:
+            kwargs = dict(kwargs)
 
         url = f"{API_BASE_URL}{endpoint}"
 
@@ -204,15 +205,7 @@ class SchluterApi:
                 f"{context}: expected list or dict, got {type(data).__name__}"
             )
         for i, item in enumerate(data):
-            if not isinstance(item, dict):
-                raise SchluterApiError(
-                    f"{context}[{i}]: expected dict, got {type(item).__name__}"
-                )
-            missing = [f for f in required_fields if f not in item]
-            if missing:
-                raise SchluterApiError(
-                    f"{context}[{i}]: missing required fields: {', '.join(missing)}"
-                )
+            SchluterApi._validate_response(item, required_fields, f"{context}[{i}]")
         return data
 
     async def get_locations(self) -> list[dict[str, Any]]:
@@ -290,8 +283,10 @@ class SchluterApi:
             location_id = location["id"]
             location_name = location["name"]
 
-            devices = await self.get_devices(location_id)
-            groups = await self.get_groups(location_id)
+            devices, groups = await asyncio.gather(
+                self.get_devices(location_id),
+                self.get_groups(location_id),
+            )
             groups_by_id = {g["id"]: g for g in groups}
 
             for device in devices:
