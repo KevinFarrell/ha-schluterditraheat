@@ -168,26 +168,67 @@ class SchluterApi:
         except aiohttp.ClientError as err:
             raise SchluterConnectionError(f"Connection error: {err}") from err
 
+    @staticmethod
+    def _validate_response(
+        data: Any,
+        required_fields: list[str],
+        context: str,
+    ) -> dict[str, Any]:
+        """Validate that a response is a dict with required fields."""
+        if not isinstance(data, dict):
+            raise SchluterApiError(
+                f"{context}: expected dict, got {type(data).__name__}"
+            )
+        missing = [f for f in required_fields if f not in data]
+        if missing:
+            raise SchluterApiError(
+                f"{context}: missing required fields: {', '.join(missing)}"
+            )
+        return data
+
+    @staticmethod
+    def _validate_response_list(
+        data: Any,
+        required_fields: list[str],
+        context: str,
+    ) -> list[dict[str, Any]]:
+        """Validate that a response is a list of dicts with required fields.
+
+        Handles single-dict-to-list coercion for API endpoints that return
+        a single object instead of a list when there is only one result.
+        """
+        if isinstance(data, dict):
+            data = [data]
+        if not isinstance(data, list):
+            raise SchluterApiError(
+                f"{context}: expected list or dict, got {type(data).__name__}"
+            )
+        for i, item in enumerate(data):
+            if not isinstance(item, dict):
+                raise SchluterApiError(
+                    f"{context}[{i}]: expected dict, got {type(item).__name__}"
+                )
+            missing = [f for f in required_fields if f not in item]
+            if missing:
+                raise SchluterApiError(
+                    f"{context}[{i}]: missing required fields: {', '.join(missing)}"
+                )
+        return data
+
     async def get_locations(self) -> list[dict[str, Any]]:
         """Get all locations for the account."""
         data = await self._request("GET", f"/locations?account$id={self._account_id}")
-        if isinstance(data, list):
-            return data
-        return [data]
+        return self._validate_response_list(data, ["id", "name"], "get_locations")
 
     async def get_devices(self, location_id: int) -> list[dict[str, Any]]:
         """Get all devices for a location."""
         data = await self._request("GET", f"/devices?location$id={location_id}")
-        if isinstance(data, list):
-            return data
-        return [data]
+        return self._validate_response_list(data, ["id", "identifier"], "get_devices")
 
     async def get_groups(self, location_id: int) -> list[dict[str, Any]]:
         """Get all groups (rooms) for a location."""
         data = await self._request("GET", f"/groups?location$id={location_id}&type=room")
-        if isinstance(data, list):
-            return data
-        return [data]
+        return self._validate_response_list(data, ["id", "name"], "get_groups")
 
     async def get_device_attributes(self, device_id: int) -> dict[str, Any]:
         """Get attributes for a specific device."""
@@ -204,10 +245,11 @@ class SchluterApi:
 
         endpoint = f"/device/{device_id}/attribute?attributes={','.join(attributes)}"
         data = await self._request("GET", endpoint)
-
-        if isinstance(data, dict):
-            return data
-        raise SchluterApiError(f"Unexpected response type: {type(data)}")
+        return self._validate_response(
+            data,
+            ["roomTemperatureDisplay", "setpointMode"],
+            f"get_device_attributes({device_id})",
+        )
 
     async def set_device_attribute(
         self,
