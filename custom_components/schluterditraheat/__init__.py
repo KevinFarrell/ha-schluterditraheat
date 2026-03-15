@@ -15,10 +15,19 @@ from homeassistant.helpers.update_coordinator import (
 
 from .api import (
     SchluterApi,
+    SchluterApiError,
     SchluterAuthenticationError,
     SchluterConnectionError,
+    SchluterRateLimitError,
 )
-from .const import DOMAIN, SCAN_INTERVAL
+from .const import (
+    DOMAIN,
+    RATE_LIMIT_BACKOFF_FACTOR,
+    RATE_LIMIT_INITIAL_BACKOFF,
+    RATE_LIMIT_MAX_BACKOFF,
+    SCAN_INTERVAL,
+    STATIC_REFRESH_INTERVAL_POLLS,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -73,7 +82,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 class SchluterDataUpdateCoordinator(DataUpdateCoordinator):
-    """Class to manage fetching Schluter data from the API."""
+    """Class to manage fetching Schluter data from the API.
+
+    Caches static data (locations, devices, groups) and refreshes it hourly.
+    Polls only device attributes on each 60-second cycle. Implements
+    exponential backoff on rate-limit (429) responses.
+    """
 
     def __init__(self, hass: HomeAssistant, api: SchluterApi) -> None:
         """Initialize the coordinator."""
@@ -84,22 +98,91 @@ class SchluterDataUpdateCoordinator(DataUpdateCoordinator):
             update_interval=SCAN_INTERVAL,
         )
         self.api = api
+        self._static_data: dict[int, dict] | None = None
+        self._polls_since_static_refresh: int = 0
+        self._backoff_interval: timedelta | None = None
+
+    def _needs_static_refresh(self) -> bool:
+        """Determine if static data needs to be refreshed."""
+        if self._static_data is None:
+            return True
+        return self._polls_since_static_refresh >= STATIC_REFRESH_INTERVAL_POLLS
+
+    def _apply_rate_limit_backoff(self) -> None:
+        """Increase the poll interval due to rate limiting."""
+        if self._backoff_interval is None:
+            self._backoff_interval = RATE_LIMIT_INITIAL_BACKOFF
+        else:
+            self._backoff_interval = min(
+                self._backoff_interval * RATE_LIMIT_BACKOFF_FACTOR,
+                RATE_LIMIT_MAX_BACKOFF,
+            )
+        self.update_interval = self._backoff_interval
+        _LOGGER.warning(
+            "Rate limited by Schluter API, backing off to %s",
+            self._backoff_interval,
+        )
+
+    def _reset_backoff(self) -> None:
+        """Reset poll interval to normal after a successful response."""
+        if self._backoff_interval is not None:
+            _LOGGER.info(
+                "Rate limit backoff cleared, resuming normal %s poll interval",
+                SCAN_INTERVAL,
+            )
+            self._backoff_interval = None
+            self.update_interval = SCAN_INTERVAL
 
     async def _async_update_data(self) -> dict[int, dict]:
         """Fetch data from API.
 
-        Returns a dictionary mapping device_id to thermostat data.
+        On first call and every STATIC_REFRESH_INTERVAL_POLLS polls, fetches
+        full static data (locations, devices, groups). On every other poll,
+        fetches only dynamic device attributes for known device_ids.
+
+        Returns a dictionary mapping device_id to merged thermostat data,
+        preserving the same dict shape that climate.py expects.
         """
         try:
-            thermostats = await self.api.get_all_thermostats()
+            # Refresh static data if needed
+            if self._needs_static_refresh():
+                self._static_data = await self.api.get_static_data()
+                self._polls_since_static_refresh = 0
+                _LOGGER.debug(
+                    "Refreshed static data, %d devices found",
+                    len(self._static_data),
+                )
 
-            # Convert list to dict keyed by device_id
-            return {t["device_id"]: t for t in thermostats}
+            self._polls_since_static_refresh += 1
+
+            # Fetch dynamic attributes for known devices
+            device_ids = list(self._static_data.keys())
+            dynamic_data = await self.api.get_device_attributes_bulk(device_ids)
+
+            # Successful response — clear any backoff
+            self._reset_backoff()
+
+            # Merge static + dynamic, same shape as get_all_thermostats()
+            result: dict[int, dict] = {}
+            for device_id, static in self._static_data.items():
+                if device_id not in dynamic_data:
+                    continue
+                result[device_id] = {**static, **dynamic_data[device_id]}
+
+            return result
 
         except SchluterAuthenticationError as err:
-            # Trigger reauth flow
-            raise ConfigEntryAuthFailed(f"Authentication failed: {err}") from err
+            raise ConfigEntryAuthFailed(
+                f"Authentication failed: {err}"
+            ) from err
+        except SchluterRateLimitError as err:
+            self._apply_rate_limit_backoff()
+            raise UpdateFailed(
+                f"Rate limited by API, next poll in {self._backoff_interval}: {err}"
+            ) from err
         except SchluterConnectionError as err:
-            raise UpdateFailed(f"Error communicating with API: {err}") from err
-        except Exception as err:
-            raise UpdateFailed(f"Unexpected error: {err}") from err
+            raise UpdateFailed(
+                f"Error communicating with API: {err}"
+            ) from err
+        except SchluterApiError as err:
+            raise UpdateFailed(f"Unexpected API error: {err}") from err

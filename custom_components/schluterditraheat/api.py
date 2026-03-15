@@ -327,6 +327,8 @@ class SchluterApi:
         for device_id in device_ids:
             try:
                 raw = await self.get_device_attributes(device_id)
+            except SchluterRateLimitError:
+                raise  # propagate to coordinator for backoff
             except SchluterApiError as err:
                 _LOGGER.error(
                     "Failed to get attributes for device %s: %s", device_id, err
