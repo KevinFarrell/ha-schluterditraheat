@@ -26,6 +26,7 @@ from .const import (
     MAX_TEMP_C,
     MIN_TEMP_C,
     MODE_AUTO,
+    MODE_MANUAL,
     MODE_OFF,
 )
 
@@ -172,19 +173,7 @@ class SchluterThermostat(CoordinatorEntity[SchluterDataUpdateCoordinator], Clima
         elif hvac_mode == HVACMode.AUTO:
             mode = MODE_AUTO
         elif hvac_mode == HVACMode.HEAT:
-            # HEAT mode = bypass/manual mode (maintain current setpoint)
-            # We'll just ensure it's not in auto or off
-            # If already in bypass, keep it; otherwise don't change from auto
-            current_mode = self.coordinator.data.get(self._device_id, {}).get("mode")
-            if current_mode in [MODE_OFF, MODE_AUTO]:
-                # Don't have a specific "manual" mode in the API
-                # Setting a temperature will automatically put it in bypass
-                # So we'll skip this for now
-                _LOGGER.warning(
-                    "HEAT mode not directly supported. Use AUTO for schedule or set temperature for manual override."
-                )
-                return
-            return
+            mode = MODE_MANUAL
         else:
             _LOGGER.error("Unsupported HVAC mode: %s", hvac_mode)
             return
