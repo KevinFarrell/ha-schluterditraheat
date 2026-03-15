@@ -158,10 +158,13 @@ class SchluterThermostat(CoordinatorEntity[SchluterDataUpdateCoordinator], Clima
         if (temperature := kwargs.get(ATTR_TEMPERATURE)) is None:
             return
 
-        # API expects temperature in Celsius
         await self.coordinator.api.set_temperature(self._device_id, temperature)
 
-        # Request immediate update
+        # Optimistic update — push new value to UI immediately
+        if self._device_id in self.coordinator.data:
+            self.coordinator.data[self._device_id]["target_temperature"] = temperature
+            self.async_write_ha_state()
+
         await self.coordinator.async_request_refresh()
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
@@ -178,5 +181,9 @@ class SchluterThermostat(CoordinatorEntity[SchluterDataUpdateCoordinator], Clima
 
         await self.coordinator.api.set_mode(self._device_id, mode)
 
-        # Request immediate update
+        # Optimistic update — push new value to UI immediately
+        if self._device_id in self.coordinator.data:
+            self.coordinator.data[self._device_id]["mode"] = mode
+            self.async_write_ha_state()
+
         await self.coordinator.async_request_refresh()
