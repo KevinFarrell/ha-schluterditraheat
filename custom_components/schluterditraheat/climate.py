@@ -86,6 +86,11 @@ class SchluterThermostat(CoordinatorEntity[SchluterDataUpdateCoordinator], Clima
         return thermostat.get("name", f"Thermostat {self._device_id}")
 
     @property
+    def available(self) -> bool:
+        """Return True if entity is available."""
+        return self._device_id in self.coordinator.data
+
+    @property
     def name(self) -> str:
         """Return the name of the thermostat."""
         thermostat = self.coordinator.data.get(self._device_id, {})
