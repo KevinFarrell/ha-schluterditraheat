@@ -25,6 +25,10 @@ class SchluterAuthenticationError(SchluterApiError):
     """Invalid credentials or session expired."""
 
 
+class SchluterSessionLimitError(SchluterAuthenticationError):
+    """Too many active sessions on the account."""
+
+
 class SchluterRateLimitError(SchluterApiError):
     """Rate limit exceeded."""
 
@@ -75,6 +79,15 @@ class SchluterApi:
                         raise SchluterApiError(f"Authentication failed: {resp.status} - {text}")
 
                     data = await resp.json()
+
+                    if "error" in data:
+                        error_code = data["error"].get("code", "")
+                        if error_code == "ACCSESSEXC":
+                            raise SchluterSessionLimitError(
+                                "Too many active sessions. Log out of the "
+                                "Schluter app or web portal and try again."
+                            )
+                        raise SchluterApiError(f"Login error: {error_code}")
 
                     self._session_id = data.get("session")
                     self._refresh_token = data.get("refreshToken")
@@ -368,6 +381,20 @@ class SchluterApi:
             thermostats.append(thermostat)
 
         return thermostats
+
+    async def logout(self) -> None:
+        """Log out and invalidate the current session."""
+        if not self._session_id:
+            return
+
+        try:
+            await self._request("GET", "/logout", _retry_auth=False)
+        except SchluterApiError as err:
+            _LOGGER.debug("Logout failed: %s", err)
+        finally:
+            self._session_id = None
+            self._refresh_token = None
+            self._account_id = None
 
     @property
     def is_authenticated(self) -> bool:

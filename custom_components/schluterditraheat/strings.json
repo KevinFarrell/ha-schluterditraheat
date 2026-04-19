@@ -21,6 +21,7 @@
       "cannot_connect": "Failed to connect to Schluter service. Please check your internet connection.",
       "invalid_auth": "Invalid email address or password. Please try again.",
       "rate_limit": "Too many login attempts. Please wait a few minutes and try again.",
+      "session_limit": "Too many active Schluter sessions. Please log out of the Schluter app or web portal and try again.",
       "unknown": "An unexpected error occurred. Please try again later."
     },
     "abort": {

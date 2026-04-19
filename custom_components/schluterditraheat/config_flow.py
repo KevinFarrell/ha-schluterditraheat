@@ -17,6 +17,7 @@ from .api import (
     SchluterAuthenticationError,
     SchluterConnectionError,
     SchluterRateLimitError,
+    SchluterSessionLimitError,
 )
 from .const import DOMAIN
 
@@ -88,6 +89,8 @@ class SchluterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             except SchluterConnectionError:
                 errors["base"] = "cannot_connect"
+            except SchluterSessionLimitError:
+                errors["base"] = "session_limit"
             except SchluterAuthenticationError:
                 errors["base"] = "invalid_auth"
             except SchluterRateLimitError:
@@ -141,6 +144,8 @@ class SchluterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             except SchluterConnectionError:
                 errors["base"] = "cannot_connect"
+            except SchluterSessionLimitError:
+                errors["base"] = "session_limit"
             except SchluterAuthenticationError:
                 errors["base"] = "invalid_auth"
             except SchluterRateLimitError:

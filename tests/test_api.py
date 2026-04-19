@@ -8,6 +8,7 @@ from custom_components.schluterditraheat.api import (
     SchluterApiError,
     SchluterAuthenticationError,
     SchluterConnectionError,
+    SchluterSessionLimitError,
 )
 from custom_components.schluterditraheat.const import API_BASE_URL
 
@@ -82,6 +83,91 @@ class TestAuthentication:
 
         with pytest.raises(SchluterApiError):
             await api_client.authenticate()
+
+
+class TestSessionLimit:
+    """Test session limit error handling."""
+
+    async def test_session_limit_raises_specific_error(self, api_client, mock_aiohttp):
+        """Test that ACCSESSEXC error code raises SchluterSessionLimitError."""
+        mock_aiohttp.post(
+            f"{API_BASE_URL}/login",
+            payload={"error": {"code": "ACCSESSEXC", "data": {"count": 3}}},
+            status=200,
+        )
+
+        with pytest.raises(SchluterSessionLimitError, match="Too many active sessions"):
+            await api_client.authenticate()
+
+    async def test_session_limit_is_authentication_error(self, api_client, mock_aiohttp):
+        """Test that SchluterSessionLimitError is catchable as SchluterAuthenticationError."""
+        mock_aiohttp.post(
+            f"{API_BASE_URL}/login",
+            payload={"error": {"code": "ACCSESSEXC", "data": {"count": 3}}},
+            status=200,
+        )
+
+        with pytest.raises(SchluterAuthenticationError):
+            await api_client.authenticate()
+
+    async def test_unknown_login_error_raises_api_error(self, api_client, mock_aiohttp):
+        """Test that an unrecognized error code raises SchluterApiError."""
+        mock_aiohttp.post(
+            f"{API_BASE_URL}/login",
+            payload={"error": {"code": "SOMETHING_ELSE"}},
+            status=200,
+        )
+
+        with pytest.raises(SchluterApiError, match="Login error: SOMETHING_ELSE"):
+            await api_client.authenticate()
+
+
+class TestLogout:
+    """Test logout functionality."""
+
+    async def test_logout_success(self, api_client, mock_aiohttp):
+        """Test successful logout clears session state."""
+        api_client._session_id = "test_session"
+        api_client._refresh_token = "test_refresh"
+        api_client._account_id = 10001
+
+        mock_aiohttp.get(
+            f"{API_BASE_URL}/logout",
+            payload={"success": True},
+            status=200,
+        )
+
+        await api_client.logout()
+
+        assert api_client._session_id is None
+        assert api_client._refresh_token is None
+        assert api_client._account_id is None
+        assert not api_client.is_authenticated
+
+    async def test_logout_failure_still_clears_state(self, api_client, mock_aiohttp):
+        """Test that logout clears local state even if the API call fails."""
+        api_client._session_id = "test_session"
+        api_client._refresh_token = "test_refresh"
+        api_client._account_id = 10001
+
+        mock_aiohttp.get(
+            f"{API_BASE_URL}/logout",
+            status=500,
+            body="Internal Server Error",
+        )
+
+        await api_client.logout()
+
+        assert api_client._session_id is None
+        assert not api_client.is_authenticated
+
+    async def test_logout_when_not_authenticated(self, api_client):
+        """Test that logout is a no-op when not authenticated."""
+        assert api_client._session_id is None
+
+        await api_client.logout()  # should not raise
+
+        assert not api_client.is_authenticated
 
 
 class TestGetLocations:
