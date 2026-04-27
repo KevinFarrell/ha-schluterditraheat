@@ -8,8 +8,11 @@ import pytest
 from custom_components.schluterditraheat.climate import SchluterThermostat
 from custom_components.schluterditraheat.const import (
     MODE_AUTO,
+    MODE_FROST_SAFE,
     MODE_MANUAL,
     MODE_OFF,
+    PRESET_FROST_PROTECTION,
+    PRESET_NONE,
 )
 
 
@@ -111,6 +114,31 @@ class TestClimateProperties:
         coordinator.data[40001]["mode"] = MODE_OFF
         assert thermostat.hvac_action == HVACAction.OFF
 
+    def test_preset_mode_none_when_manual(self, thermostat, coordinator):
+        """Test preset_mode returns PRESET_NONE for manual mode."""
+        coordinator.data[40001]["mode"] = MODE_MANUAL
+        assert thermostat.preset_mode == PRESET_NONE
+
+    def test_preset_mode_none_when_auto(self, thermostat, coordinator):
+        """Test preset_mode returns PRESET_NONE for auto (schedule) mode."""
+        coordinator.data[40001]["mode"] = MODE_AUTO
+        assert thermostat.preset_mode == PRESET_NONE
+
+    def test_preset_mode_none_when_off(self, thermostat, coordinator):
+        """Test preset_mode returns PRESET_NONE when off."""
+        coordinator.data[40001]["mode"] = MODE_OFF
+        assert thermostat.preset_mode == PRESET_NONE
+
+    def test_preset_mode_frost_protection(self, thermostat, coordinator):
+        """Test preset_mode returns PRESET_FROST_PROTECTION for frostProtection mode."""
+        coordinator.data[40001]["mode"] = MODE_FROST_SAFE
+        assert thermostat.preset_mode == PRESET_FROST_PROTECTION
+
+    def test_preset_mode_unknown_returns_none(self, thermostat, coordinator):
+        """Test preset_mode returns None for an unrecognized API mode."""
+        coordinator.data[40001]["mode"] = "someNewUnknownMode"
+        assert thermostat.preset_mode is None
+
     def test_min_max_temp(self, thermostat):
         """Test min/max temperature limits."""
         assert thermostat.min_temp == 5.0
@@ -178,3 +206,28 @@ class TestOptimisticUpdates:
 
         coordinator.api.set_mode.assert_called_once_with(40001, MODE_OFF)
         assert coordinator.data[40001]["mode"] == MODE_OFF
+
+    async def test_set_preset_mode_frost_protection(self, thermostat, coordinator):
+        """Test that set_preset_mode frost_protection sends frostProtection to API."""
+        await thermostat.async_set_preset_mode(PRESET_FROST_PROTECTION)
+
+        coordinator.api.set_mode.assert_called_once_with(40001, MODE_FROST_SAFE)
+        assert coordinator.data[40001]["mode"] == MODE_FROST_SAFE
+        thermostat.async_write_ha_state.assert_called_once()
+        coordinator.async_request_refresh.assert_called_once()
+
+    async def test_set_preset_mode_none_maps_to_manual(self, thermostat, coordinator):
+        """Test that set_preset_mode none sends manual to API."""
+        coordinator.data[40001]["mode"] = MODE_FROST_SAFE  # start in frost protection
+
+        await thermostat.async_set_preset_mode(PRESET_NONE)
+
+        coordinator.api.set_mode.assert_called_once_with(40001, MODE_MANUAL)
+        assert coordinator.data[40001]["mode"] == MODE_MANUAL
+        thermostat.async_write_ha_state.assert_called_once()
+
+    async def test_set_preset_mode_unsupported_is_noop(self, thermostat, coordinator):
+        """Test that an unsupported preset mode does not call the API."""
+        await thermostat.async_set_preset_mode("turbo_mode")
+
+        coordinator.api.set_mode.assert_not_called()
