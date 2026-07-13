@@ -13,10 +13,12 @@ from homeassistant.components.climate import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SchluterDataUpdateCoordinator
+from .api import SchluterApiError
 from .const import (
     ATTR_DEVICE_ID,
     ATTR_GROUP_NAME,
@@ -163,7 +165,10 @@ class SchluterThermostat(CoordinatorEntity[SchluterDataUpdateCoordinator], Clima
         if (temperature := kwargs.get(ATTR_TEMPERATURE)) is None:
             return
 
-        await self.coordinator.api.set_temperature(self._device_id, temperature)
+        try:
+            await self.coordinator.api.set_temperature(self._device_id, temperature)
+        except SchluterApiError as err:
+            raise HomeAssistantError(f"Failed to set temperature: {err}") from err
 
         # Optimistic update — push new value to UI immediately
         if self._device_id in self.coordinator.data:
@@ -184,7 +189,10 @@ class SchluterThermostat(CoordinatorEntity[SchluterDataUpdateCoordinator], Clima
             _LOGGER.error("Unsupported HVAC mode: %s", hvac_mode)
             return
 
-        await self.coordinator.api.set_mode(self._device_id, mode)
+        try:
+            await self.coordinator.api.set_mode(self._device_id, mode)
+        except SchluterApiError as err:
+            raise HomeAssistantError(f"Failed to set HVAC mode: {err}") from err
 
         # Optimistic update — push new value to UI immediately
         if self._device_id in self.coordinator.data:

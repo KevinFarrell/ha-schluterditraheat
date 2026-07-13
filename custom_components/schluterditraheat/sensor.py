@@ -10,7 +10,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE
+from homeassistant.const import PERCENTAGE, UnitOfPower
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -29,10 +29,11 @@ async def async_setup_entry(
     """Set up Schluter sensor entities from a config entry."""
     coordinator: SchluterDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    async_add_entities([
-        SchluterHeatingOutputSensor(coordinator, device_id)
-        for device_id in coordinator.data
-    ])
+    entities: list[SensorEntity] = []
+    for device_id in coordinator.data:
+        entities.append(SchluterHeatingOutputSensor(coordinator, device_id))
+        entities.append(SchluterPowerSensor(coordinator, device_id))
+    async_add_entities(entities)
 
 
 class SchluterHeatingOutputSensor(
@@ -68,6 +69,54 @@ class SchluterHeatingOutputSensor(
         """Return the current heating output percentage."""
         thermostat = self.coordinator.data.get(self._device_id, {})
         return thermostat.get("heating_percent", 0)
+
+    @property
+    def available(self) -> bool:
+        """Return True if entity is available."""
+        return self._device_id in self.coordinator.data
+
+
+class SchluterPowerSensor(
+    CoordinatorEntity[SchluterDataUpdateCoordinator], SensorEntity
+):
+    """Instantaneous power draw of a Schluter thermostat's heating load.
+
+    The thermostat reports its connected load (watts) and its current heating
+    output percentage; their product is the power currently being drawn.
+    """
+
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_has_entity_name = True
+    _attr_name = "Power"
+
+    def __init__(
+        self, coordinator: SchluterDataUpdateCoordinator, device_id: int
+    ) -> None:
+        """Initialize the power sensor."""
+        super().__init__(coordinator)
+        self._device_id = device_id
+
+        thermostat = coordinator.data[device_id]
+        self._attr_unique_id = f"{thermostat['identifier']}_power"
+
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, thermostat["identifier"])},
+            "name": thermostat.get("group_name") or thermostat.get("name"),
+            "manufacturer": thermostat.get("vendor", "Schluter"),
+            "model": thermostat.get("sku", "DITRA-HEAT-E-WiFi"),
+        }
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the current power draw in watts."""
+        thermostat = self.coordinator.data.get(self._device_id)
+        if thermostat is None:
+            return None
+        load_watt = thermostat.get("load_watt") or 0
+        heating_percent = thermostat.get("heating_percent") or 0
+        return round(load_watt * heating_percent / 100, 1)
 
     @property
     def available(self) -> bool:

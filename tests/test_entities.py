@@ -10,6 +10,7 @@ from custom_components.schluterditraheat.binary_sensor import (
 )
 from custom_components.schluterditraheat.sensor import (
     SchluterHeatingOutputSensor,
+    SchluterPowerSensor,
 )
 
 
@@ -26,6 +27,7 @@ MOCK_THERMOSTAT = {
     "heating_percent": 42,
     "air_floor_mode": "floor",
     "gfci_status": "ok",
+    "load_watt": 264,
 }
 
 
@@ -103,3 +105,36 @@ class TestHeatingOutputSensor:
         """Test unique_id is based on identifier."""
         sensor = SchluterHeatingOutputSensor(coordinator, 40001)
         assert sensor._attr_unique_id == "aa11bb22cc33dd44_heating_output"
+
+
+class TestPowerSensor:
+    """Test instantaneous power sensor entity."""
+
+    def test_native_value_is_load_times_output(self, coordinator):
+        """Test power is connected load scaled by heating output percent."""
+        sensor = SchluterPowerSensor(coordinator, 40001)
+        # 264 W * 42% = 110.88 W
+        assert sensor.native_value == 110.9
+
+    def test_native_value_zero_when_idle(self, coordinator):
+        """Test power is 0 when the thermostat is not calling for heat."""
+        coordinator.data[40001]["heating_percent"] = 0
+        sensor = SchluterPowerSensor(coordinator, 40001)
+        assert sensor.native_value == 0
+
+    def test_native_value_zero_when_load_unknown(self, coordinator):
+        """Test power is 0 when the connected load is missing."""
+        del coordinator.data[40001]["load_watt"]
+        sensor = SchluterPowerSensor(coordinator, 40001)
+        assert sensor.native_value == 0
+
+    def test_native_value_none_when_device_gone(self, coordinator):
+        """Test power is None when the device is absent from coordinator data."""
+        sensor = SchluterPowerSensor(coordinator, 40001)
+        coordinator.data = {}
+        assert sensor.native_value is None
+
+    def test_unique_id(self, coordinator):
+        """Test unique_id is based on identifier."""
+        sensor = SchluterPowerSensor(coordinator, 40001)
+        assert sensor._attr_unique_id == "aa11bb22cc33dd44_power"

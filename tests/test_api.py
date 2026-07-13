@@ -1,4 +1,6 @@
 """Unit tests for Schluter API client."""
+from datetime import datetime, timezone
+
 import pytest
 from aiohttp import ClientSession
 from aioresponses import aioresponses
@@ -8,6 +10,8 @@ from custom_components.schluterditraheat.api import (
     SchluterApiError,
     SchluterAuthenticationError,
     SchluterConnectionError,
+    SchluterDailyLimitError,
+    SchluterRateLimitError,
     SchluterSessionLimitError,
 )
 from custom_components.schluterditraheat.const import API_BASE_URL
@@ -118,7 +122,7 @@ class TestSessionLimit:
             status=200,
         )
 
-        with pytest.raises(SchluterApiError, match="Login error: SOMETHING_ELSE"):
+        with pytest.raises(SchluterApiError, match="API error: SOMETHING_ELSE"):
             await api_client.authenticate()
 
 
@@ -650,3 +654,370 @@ class TestSplitFetching:
         assert t["heating_percent"] == 0
         assert t["air_floor_mode"] == "floor"
         assert t["gfci_status"] == "ok"
+
+
+class TestRateLimitCapture:
+    """Test that rate-limit headers are captured off responses."""
+
+    async def test_captures_headers_on_request(self, api_client, mock_aiohttp):
+        """Test _request records the rate-limit budget from response headers."""
+        api_client._session_id = "test_session"
+        api_client._account_id = 10001
+
+        mock_aiohttp.get(
+            f"{API_BASE_URL}/locations?account$id=10001",
+            payload=[{"id": 30001, "name": "Home"}],
+            status=200,
+            headers={
+                "X-RateLimit-Limit": "100",
+                "X-RateLimit-Remaining": "97",
+                "X-RateLimit-Reset": "42",
+            },
+        )
+
+        await api_client.get_locations()
+
+        assert api_client.rate_limit is not None
+        assert api_client.rate_limit.limit == 100
+        assert api_client.rate_limit.remaining == 97
+
+    async def test_captures_headers_on_login(self, api_client, mock_aiohttp):
+        """Test authenticate records the rate-limit budget too."""
+        mock_aiohttp.post(
+            f"{API_BASE_URL}/login",
+            payload={
+                "session": "s",
+                "account": {"id": 10001},
+                "user": {"format": {"temperature": "f"}},
+            },
+            status=200,
+            headers={"X-RateLimit-Limit": "3", "X-RateLimit-Remaining": "2"},
+        )
+
+        await api_client.authenticate()
+
+        assert api_client.rate_limit is not None
+        assert api_client.rate_limit.limit == 3
+        assert api_client.rate_limit.remaining == 2
+
+
+class TestErrorCodeHandling:
+    """Test JSON error-code mapping on HTTP-200 bodies."""
+
+    async def test_daily_limit_raises_daily_error(self, api_client, mock_aiohttp):
+        """Test ACCDAYREQMAX maps to SchluterDailyLimitError."""
+        api_client._session_id = "test_session"
+        api_client._account_id = 10001
+
+        mock_aiohttp.get(
+            f"{API_BASE_URL}/locations?account$id=10001",
+            payload={"error": {"code": "ACCDAYREQMAX", "data": {"daily": 30000}}},
+            status=200,
+        )
+
+        with pytest.raises(SchluterDailyLimitError):
+            await api_client.get_locations()
+
+    async def test_daily_error_is_rate_limit_error(self, api_client, mock_aiohttp):
+        """Test SchluterDailyLimitError is catchable as SchluterRateLimitError."""
+        api_client._session_id = "test_session"
+        api_client._account_id = 10001
+
+        mock_aiohttp.get(
+            f"{API_BASE_URL}/locations?account$id=10001",
+            payload={"error": {"code": "ACCDAYREQMAX"}},
+            status=200,
+        )
+
+        with pytest.raises(SchluterRateLimitError):
+            await api_client.get_locations()
+
+    async def test_login_rate_limit_code(self, api_client, mock_aiohttp):
+        """Test ACCRATELIMIT maps to SchluterRateLimitError."""
+        api_client._session_id = "test_session"
+        api_client._account_id = 10001
+
+        mock_aiohttp.get(
+            f"{API_BASE_URL}/locations?account$id=10001",
+            payload={"error": {"code": "ACCRATELIMIT"}},
+            status=200,
+        )
+
+        with pytest.raises(SchluterRateLimitError):
+            await api_client.get_locations()
+
+    async def test_session_expired_reauthenticates_and_retries(
+        self, api_client, mock_aiohttp
+    ):
+        """Test USRSESSEXP triggers re-auth and a retry of the request."""
+        api_client._session_id = "old_session"
+        api_client._account_id = 10001
+
+        # First call: session-expired error body
+        mock_aiohttp.get(
+            f"{API_BASE_URL}/locations?account$id=10001",
+            payload={"error": {"code": "USRSESSEXP"}},
+            status=200,
+        )
+        # Re-auth succeeds
+        mock_aiohttp.post(
+            f"{API_BASE_URL}/login",
+            payload={
+                "session": "new_session",
+                "account": {"id": 10001},
+                "user": {"format": {"temperature": "f"}},
+            },
+            status=200,
+        )
+        # Retry succeeds
+        mock_aiohttp.get(
+            f"{API_BASE_URL}/locations?account$id=10001",
+            payload=[{"id": 30001, "name": "Home"}],
+            status=200,
+        )
+
+        locations = await api_client.get_locations()
+
+        assert len(locations) == 1
+        assert api_client._session_id == "new_session"
+
+    async def test_unknown_error_code_raises_api_error(self, api_client, mock_aiohttp):
+        """Test an unrecognized error code raises the generic SchluterApiError."""
+        api_client._session_id = "test_session"
+        api_client._account_id = 10001
+
+        mock_aiohttp.get(
+            f"{API_BASE_URL}/locations?account$id=10001",
+            payload={"error": {"code": "MYSTERY"}},
+            status=200,
+        )
+
+        with pytest.raises(SchluterApiError, match="API error: MYSTERY"):
+            await api_client.get_locations()
+
+
+class TestReviewRegressions:
+    """Regression tests for issues found in code review."""
+
+    async def test_null_account_does_not_crash(self, api_client, mock_aiohttp):
+        """Test a null 'account' value raises a clean error, not AttributeError."""
+        mock_aiohttp.post(
+            f"{API_BASE_URL}/login",
+            payload={"session": "s", "account": None, "user": None},
+            status=200,
+        )
+
+        # Should raise SchluterApiError (missing account id), NOT AttributeError.
+        with pytest.raises(SchluterApiError):
+            await api_client.authenticate()
+
+    async def test_bulk_propagates_session_error(self, api_client, mock_aiohttp):
+        """Test an account-wide session error propagates out of the bulk fetch."""
+        import re as _re
+
+        api_client._session_id = "test_session"
+
+        mock_aiohttp.get(
+            _re.compile(r".*/device/40001/attribute\?attributes=.*"),
+            payload={"error": {"code": "ACCSESSEXC"}},
+            status=200,
+        )
+
+        # ACCSESSEXC -> SchluterSessionLimitError (an auth error) must NOT be
+        # swallowed as a per-device skip.
+        with pytest.raises(SchluterAuthenticationError):
+            await api_client.get_device_attributes_bulk([40001])
+
+    async def test_bulk_propagates_daily_limit(self, api_client, mock_aiohttp):
+        """Test a daily-cap error propagates out of the bulk fetch."""
+        import re as _re
+
+        api_client._session_id = "test_session"
+
+        mock_aiohttp.get(
+            _re.compile(r".*/device/40001/attribute\?attributes=.*"),
+            payload={"error": {"code": "ACCDAYREQMAX"}},
+            status=200,
+        )
+
+        with pytest.raises(SchluterDailyLimitError):
+            await api_client.get_device_attributes_bulk([40001])
+
+    async def test_reauth_propagates_rate_limit(self, api_client, mock_aiohttp):
+        """Test a rate limit during mid-poll re-auth is not mislabeled as auth."""
+        api_client._session_id = "expired"
+        api_client._account_id = 10001
+
+        # First request 401 -> triggers re-auth
+        mock_aiohttp.get(
+            f"{API_BASE_URL}/locations?account$id=10001",
+            status=401,
+        )
+        # Re-login is rate limited (ACCRATELIMIT), NOT an auth failure
+        mock_aiohttp.post(
+            f"{API_BASE_URL}/login",
+            payload={"error": {"code": "ACCRATELIMIT"}},
+            status=200,
+        )
+
+        with pytest.raises(SchluterRateLimitError):
+            await api_client.get_locations()
+class TestLoadWattParsing:
+    """Test connected-load (watts) parsing from device attributes."""
+
+    async def test_load_watt_sums_both_outputs(self, api_client, mock_aiohttp):
+        """Test load_watt is the sum of both heating outputs."""
+        api_client._session_id = "test_session"
+        _mock_attributes(
+            mock_aiohttp,
+            device_id=40001,
+            loadWattOutput1=264,
+            loadWattOutput2=100,
+        )
+
+        result = await api_client.get_device_attributes_bulk([40001])
+
+        assert result[40001]["load_watt"] == 364
+
+    async def test_load_watt_defaults_to_zero_when_absent(
+        self, api_client, mock_aiohttp
+    ):
+        """Test load_watt is 0 when the outputs are missing from the response."""
+        api_client._session_id = "test_session"
+        _mock_attributes(mock_aiohttp, device_id=40001)
+
+        result = await api_client.get_device_attributes_bulk([40001])
+
+        assert result[40001]["load_watt"] == 0
+
+    def test_parse_load_watt_tolerates_value_wrapper_and_none(self):
+        """Test _parse_load_watt handles {'value': n} wrappers and None."""
+        assert SchluterApi._parse_load_watt(
+            {"loadWattOutput1": {"value": 264}, "loadWattOutput2": None}
+        ) == 264
+        assert SchluterApi._parse_load_watt({}) == 0
+
+
+class TestConsumptionHistory:
+    """Test energy consumption history fetching and parsing."""
+
+    async def test_get_consumption_history_success(self, api_client, mock_aiohttp):
+        """Test fetching hourly consumption history."""
+        api_client._session_id = "test_session"
+        mock_aiohttp.get(
+            f"{API_BASE_URL}/device/40001/consumption/hourly",
+            payload={
+                "deviceId": 40001,
+                "unit": "watts",
+                "history": [
+                    {"date": "2026-07-11T00:00:00.000Z", "period": 194},
+                    {"date": "2026-07-11T01:00:00.000Z", "period": 188},
+                ],
+            },
+            status=200,
+        )
+
+        data = await api_client.get_consumption_history(40001, "hourly")
+
+        assert len(data["history"]) == 2
+
+    async def test_get_consumption_history_error_code(self, api_client, mock_aiohttp):
+        """Test that an API error code raises SchluterApiError."""
+        api_client._session_id = "test_session"
+        mock_aiohttp.get(
+            f"{API_BASE_URL}/device/40001/energy/hourly",
+            payload={"error": {"code": "SVCINVREQ"}},
+            status=200,
+        )
+
+        # consumption endpoint returns an error envelope
+        mock_aiohttp.get(
+            f"{API_BASE_URL}/device/40001/consumption/hourly",
+            payload={"error": {"code": "SVCINVREQ"}},
+            status=200,
+        )
+
+        with pytest.raises(SchluterApiError, match="SVCINVREQ"):
+            await api_client.get_consumption_history(40001, "hourly")
+
+    async def test_get_consumption_history_invalid_granularity(self, api_client):
+        """Test that an invalid granularity raises ValueError."""
+        with pytest.raises(ValueError):
+            await api_client.get_consumption_history(40001, "yearly")
+
+    def test_parse_consumption_history_converts_wh_to_kwh(self):
+        """Test period watt-hours are converted to kWh and sorted."""
+        data = {
+            "unit": "watts",
+            "history": [
+                {"date": "2026-07-11T01:00:00.000Z", "period": 500},
+                {"date": "2026-07-11T00:00:00.000Z", "period": 1000},
+            ],
+        }
+
+        points = SchluterApi.parse_consumption_history(data)
+
+        assert points[0][0] == datetime(2026, 7, 11, 0, 0, tzinfo=timezone.utc)
+        assert points[0][1] == 1.0  # 1000 Wh -> 1 kWh
+        assert points[1][1] == 0.5  # 500 Wh -> 0.5 kWh
+
+    def test_parse_consumption_history_skips_incomplete_buckets(self):
+        """Test buckets missing a date or period are skipped."""
+        data = {
+            "history": [
+                {"date": "2026-07-11T00:00:00.000Z", "period": 100},
+                {"date": None, "period": 200},
+                {"date": "2026-07-11T02:00:00.000Z"},
+            ],
+        }
+
+        points = SchluterApi.parse_consumption_history(data)
+
+        assert len(points) == 1
+
+
+class TestBuildEnergyStatistics:
+    """Test cumulative statistics construction."""
+
+    def _points(self):
+        return [
+            (datetime(2026, 7, 11, 0, tzinfo=timezone.utc), 1.0),
+            (datetime(2026, 7, 11, 1, tzinfo=timezone.utc), 0.5),
+            (datetime(2026, 7, 11, 2, tzinfo=timezone.utc), 2.0),
+        ]
+
+    def test_first_import_accumulates_from_zero(self):
+        """Test the sum runs cumulatively from zero on a first import."""
+        rows = SchluterApi.build_energy_statistics(self._points())
+
+        assert [r["sum"] for r in rows] == [1.0, 1.5, 3.5]
+        assert [r["state"] for r in rows] == [1.0, 0.5, 2.0]
+
+    def test_incremental_import_continues_from_last_sum(self):
+        """Test only new buckets are appended, continuing the prior sum."""
+        last_start = datetime(2026, 7, 11, 1, tzinfo=timezone.utc)
+        rows = SchluterApi.build_energy_statistics(
+            self._points(),
+            last_start=last_start,
+            last_sum=10.0,   # cumulative total through the 01:00 bucket
+            last_state=0.5,  # the 01:00 bucket's own energy
+        )
+
+        # Re-emits the 01:00 bucket (correcting it) then appends 02:00.
+        assert rows[0]["start"] == last_start
+        assert rows[0]["sum"] == 10.0   # (10.0 - 0.5) + 0.5
+        assert rows[1]["start"] == datetime(2026, 7, 11, 2, tzinfo=timezone.utc)
+        assert rows[1]["sum"] == 12.0   # 10.0 + 2.0
+
+    def test_no_new_buckets_reemits_only_last(self):
+        """Test a window with nothing newer re-emits just the last bucket."""
+        last_start = datetime(2026, 7, 11, 2, tzinfo=timezone.utc)
+        rows = SchluterApi.build_energy_statistics(
+            self._points(),
+            last_start=last_start,
+            last_sum=3.5,
+            last_state=2.0,
+        )
+
+        assert len(rows) == 1
+        assert rows[0]["sum"] == 3.5

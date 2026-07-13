@@ -12,6 +12,8 @@ Tested with the **DITRA-HEAT-E-RS1** thermostat. Other models using the same clo
 
 - **Climate entity** — control temperature and mode (Auto, Heat/Manual, Off) per thermostat
 - **Heating output sensor** — track heating output percentage with history graphs and long-term statistics
+- **Power sensor** — instantaneous power draw (watts) of the connected heating load
+- **Energy dashboard** — hourly energy consumption imported into long-term statistics, including backfilled history, for use in the Home Assistant Energy dashboard
 - **GFCI fault sensor** — binary sensor for ground fault detection, enabling safety automations
 
 ## Installation
@@ -45,7 +47,23 @@ Each thermostat creates the following entities, grouped under a single device:
 |--------|------|-------------|
 | Floor Heat | Climate | Temperature control and mode selection |
 | Heating Output | Sensor | Current heating output percentage (0–100%) |
+| Power | Sensor | Instantaneous power draw in watts (connected load × heating output) |
 | GFCI Status | Binary Sensor | Ground fault detection (problem device class) |
+| Refresh | Button | Force an immediate poll of the cloud (see below) |
+
+In addition, each thermostat's hourly energy consumption is imported into Home Assistant's long-term statistics (as an external statistic, in kWh) so it can be added to the **Energy dashboard**. When first set up, available historical hours are backfilled; the statistic then refreshes hourly.
+
+> **Note:** The thermostat reports energy per hour, not a continuously increasing meter reading, so energy appears as an Energy-dashboard statistic rather than a regular sensor entity. Add it via **Settings → Dashboards → Energy → Add consumption**, where it is listed as `Schluter DITRA-HEAT` energy for each thermostat.
+
+## Polling and rate limits
+
+The thermostat's cloud backend enforces request limits and publishes its remaining budget in `X-RateLimit-*` response headers on every call. This integration:
+
+- Polls every **300 seconds** by default, the minimum cadence the backend's OEM (Sinopé) asks integrators to respect. (Static data such as device lists is refreshed roughly hourly; the fast path only fetches thermostat state.)
+- Reads the rate-limit headers on every response and **defers the next poll** automatically when the remaining budget runs low, resuming normal cadence once it recovers.
+- Recognizes the backend's JSON error codes (which it returns instead of HTTP 429): a daily-cap hit (`ACCDAYREQMAX`) pauses polling until midnight, an expired session (`USRSESSEXP`) re-authenticates transparently, and login/session limits are surfaced clearly.
+
+Because the scheduled poll is 300 seconds, a change made on the thermostat itself or in the Schluter phone app can take up to five minutes to appear in Home Assistant. Rather than make every installation poll faster than Sinopé asks, each thermostat exposes a **Refresh** button that forces an immediate poll — press it (or call `button.press` from an automation) when you want state right now. One press refreshes every thermostat on the account, and rapid presses are coalesced so the button cannot be used to hammer the API.
 
 ## Limitations
 
