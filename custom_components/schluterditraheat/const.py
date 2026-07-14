@@ -26,6 +26,10 @@ RATE_LIMIT_BACKOFF_FACTOR = 2
 MIN_TEMP_C = 5.0
 MAX_TEMP_C = 32.0
 
+# Device info
+DEFAULT_MANUFACTURER = "Schluter"
+DEFAULT_MODEL = "DITRA-HEAT-E-WiFi"
+
 # Attributes
 ATTR_DEVICE_ID = "device_id"
 ATTR_IDENTIFIER = "identifier"

@@ -13,6 +13,8 @@ Tested with the **DITRA-HEAT-E-RS1** thermostat. Other models using the same clo
 - **Climate entity** — control temperature and mode (Auto, Heat/Manual, Off) per thermostat
 - **Heating output sensor** — track heating output percentage with history graphs and long-term statistics
 - **GFCI fault sensor** — binary sensor for ground fault detection, enabling safety automations
+- **Wi-Fi signal sensor** — diagnostic sensor reporting signal strength in dBm
+- **Device metadata** — model, software and hardware version, and serial number on the device page
 
 ## Installation
 
@@ -46,6 +48,11 @@ Each thermostat creates the following entities, grouped under a single device:
 | Floor Heat | Climate | Temperature control and mode selection |
 | Heating Output | Sensor | Current heating output percentage (0–100%) |
 | GFCI Status | Binary Sensor | Ground fault detection (problem device class) |
+| Wi-Fi Signal | Sensor | Signal strength in dBm (diagnostic) |
+
+The device page also shows the model, software version, hardware version and serial number reported by the thermostat.
+
+The web app renders the same Wi-Fi reading as a five-level scale (amazing, very good, okay, weak, very weak). The API returns the underlying dBm value, which is what this integration exposes; use a template sensor if you want the bucketed wording.
 
 ## Limitations
 

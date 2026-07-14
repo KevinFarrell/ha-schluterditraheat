@@ -14,7 +14,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SchluterDataUpdateCoordinator
 from .const import (
@@ -29,6 +28,7 @@ from .const import (
     MODE_MANUAL,
     MODE_OFF,
 )
+from .entity import SchluterEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -50,8 +50,13 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class SchluterThermostat(CoordinatorEntity[SchluterDataUpdateCoordinator], ClimateEntity):
+class SchluterThermostat(SchluterEntity, ClimateEntity):
     """Representation of a Schluter DITRA-HEAT thermostat."""
+
+    # This entity names itself ("Master Bath Floor Heat") rather than being
+    # named after the device it belongs to, so it opts out of the base's
+    # has_entity_name. Flipping this would rename existing entities.
+    _attr_has_entity_name = False
 
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_supported_features = (
@@ -63,20 +68,10 @@ class SchluterThermostat(CoordinatorEntity[SchluterDataUpdateCoordinator], Clima
         self, coordinator: SchluterDataUpdateCoordinator, device_id: int
     ) -> None:
         """Initialize the thermostat."""
-        super().__init__(coordinator)
-        self._device_id = device_id
+        super().__init__(coordinator, device_id)
 
         # Set unique ID based on device identifier
-        thermostat = coordinator.data[device_id]
-        self._attr_unique_id = thermostat["identifier"]
-
-        # Set device info
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, thermostat["identifier"])},
-            "name": self._get_display_name(thermostat),
-            "manufacturer": thermostat.get("vendor", "Schluter"),
-            "model": thermostat.get("sku", "DITRA-HEAT-E-WiFi"),
-        }
+        self._attr_unique_id = self._identifier
 
     def _get_display_name(self, thermostat: dict[str, Any]) -> str:
         """Get a user-friendly display name for the thermostat."""
@@ -86,15 +81,9 @@ class SchluterThermostat(CoordinatorEntity[SchluterDataUpdateCoordinator], Clima
         return thermostat.get("name", f"Thermostat {self._device_id}")
 
     @property
-    def available(self) -> bool:
-        """Return True if entity is available."""
-        return self._device_id in self.coordinator.data
-
-    @property
     def name(self) -> str:
         """Return the name of the thermostat."""
-        thermostat = self.coordinator.data.get(self._device_id, {})
-        return self._get_display_name(thermostat)
+        return self._get_display_name(self._thermostat)
 
     @property
     def current_temperature(self) -> float | None:

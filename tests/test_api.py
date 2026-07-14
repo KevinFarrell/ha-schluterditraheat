@@ -550,6 +550,12 @@ def _mock_attributes(mock_aiohttp, device_id=40001, **overrides):
         "roomSetpoint": 23.33,
         "occupancyMode": "none",
         "gfciStatus": "ok",
+        "signature": {
+            "model": 737,
+            "hardRev": 2,
+            "softVersion": {"major": 2, "middle": 1, "minor": 0},
+        },
+        "wifiRssi": -58,
         **overrides,
     }
     mock_aiohttp.get(
@@ -650,3 +656,105 @@ class TestSplitFetching:
         assert t["heating_percent"] == 0
         assert t["air_floor_mode"] == "floor"
         assert t["gfci_status"] == "ok"
+
+
+class TestSignatureParsing:
+    """Test the signature attribute that backs device registry metadata."""
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            ({"major": 2, "middle": 1, "minor": 0}, "2.1.0"),
+            ({"major": 2, "middle": 1}, "2.1"),  # partial dict
+            ({}, None),
+            (2, "2"),
+            ("2.1.0", "2.1.0"),
+            (None, None),
+            ([1, 2], None),  # unexpected shape degrades rather than raising
+        ],
+    )
+    def test_format_version(self, value, expected):
+        """Test version formatting tolerates every shape we might be handed."""
+        assert SchluterApi._format_version(value) == expected
+
+    def test_parse_signature(self):
+        """Test signature yields model, software and hardware version."""
+        parsed = SchluterApi._parse_signature(
+            {
+                "signature": {
+                    "model": 737,
+                    "hardRev": 2,
+                    "softVersion": {"major": 2, "middle": 1, "minor": 0},
+                }
+            }
+        )
+        assert parsed == {
+            "signature_model": "737",
+            "sw_version": "2.1.0",
+            "hw_version": "2",
+        }
+
+    def test_parse_signature_absent(self):
+        """Test a device with no signature yields no keys at all."""
+        assert SchluterApi._parse_signature({}) == {}
+
+    def test_parse_signature_partial(self):
+        """Test only the fields actually present are returned."""
+        parsed = SchluterApi._parse_signature({"signature": {"hardRev": 3}})
+        assert parsed == {"hw_version": "3"}
+
+    def test_parse_signature_wrong_type(self):
+        """Test a non-dict signature is ignored rather than raising."""
+        assert SchluterApi._parse_signature({"signature": "unexpected"}) == {}
+
+
+class TestRssiParsing:
+    """Test Wi-Fi signal parsing."""
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ({"wifiRssi": -58}, -58),
+            ({"wifiRssi": -58.4}, -58),
+            ({"wifiRssi": {"value": -58}}, -58),
+            ({"wifiRssi": None}, None),
+            ({"wifiRssi": "strong"}, None),
+            ({"wifiRssi": True}, None),  # bool is an int in Python; reject it
+            ({}, None),
+        ],
+    )
+    def test_parse_rssi(self, raw, expected):
+        """Test rssi parsing tolerates the shapes this API is known to use."""
+        assert SchluterApi._parse_rssi(raw) == expected
+
+
+class TestDeviceMetadataFetching:
+    """Test that metadata flows through the bulk attribute fetch."""
+
+    async def test_bulk_includes_metadata(self, api_client, mock_aiohttp):
+        """Test signature and wifiRssi are parsed into the device dict."""
+        api_client._session_id = "test_session"
+        _mock_attributes(mock_aiohttp, 40001)
+
+        result = await api_client.get_device_attributes_bulk([40001])
+
+        assert result[40001]["signature_model"] == "737"
+        assert result[40001]["sw_version"] == "2.1.0"
+        assert result[40001]["hw_version"] == "2"
+        assert result[40001]["rssi"] == -58
+
+    async def test_bulk_omits_absent_metadata(self, api_client, mock_aiohttp):
+        """Test a device reporting neither field still parses, without the keys.
+
+        The keys must be absent rather than None so the sensor platform can
+        tell "not supported" apart from "null this poll".
+        """
+        api_client._session_id = "test_session"
+        _mock_attributes(mock_aiohttp, 40001, signature=None, wifiRssi=None)
+
+        result = await api_client.get_device_attributes_bulk([40001])
+
+        assert result[40001]["current_temperature"] == 23.33  # still works
+        assert "rssi" not in result[40001]
+        assert "sw_version" not in result[40001]
+        assert "hw_version" not in result[40001]

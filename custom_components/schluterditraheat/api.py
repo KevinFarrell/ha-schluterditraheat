@@ -237,7 +237,14 @@ class SchluterApi:
         return self._validate_response_list(data, ["id", "name"], "get_groups")
 
     async def get_device_attributes(self, device_id: int) -> dict[str, Any]:
-        """Get attributes for a specific device."""
+        """Get attributes for a specific device.
+
+        ``signature`` and ``wifiRssi`` back the device-registry metadata and the
+        Wi-Fi signal sensor. They ride along in the same request as everything
+        else, so they cost no additional calls against the API's rate limit.
+        Neither is listed as required below: a device that does not report them
+        still yields a working thermostat.
+        """
         attributes = [
             "airFloorMode",
             "roomTemperatureDisplay",
@@ -247,10 +254,13 @@ class SchluterApi:
             "occupancyMode",
             "gfciStatus",
             "floorSetpointPwm",
+            "signature",
+            "wifiRssi",
         ]
 
         endpoint = f"/device/{device_id}/attribute?attributes={','.join(attributes)}"
         data = await self._request("GET", endpoint)
+        _LOGGER.debug("Raw attributes for device %s: %s", device_id, data)
         return self._validate_response(
             data,
             ["roomTemperatureDisplay", "setpointMode"],
@@ -348,7 +358,7 @@ class SchluterApi:
                 )
                 continue
 
-            result[device_id] = {
+            parsed = {
                 "current_temperature": raw.get(
                     "roomTemperatureDisplay", {}
                 ).get("value"),
@@ -361,7 +371,59 @@ class SchluterApi:
                 "gfci_status": raw.get("gfciStatus"),
             }
 
+            # Only set keys the device actually reported, so callers can tell
+            # "not supported" apart from "reported as null this poll".
+            parsed.update(self._parse_signature(raw))
+            rssi = self._parse_rssi(raw)
+            if rssi is not None:
+                parsed["rssi"] = rssi
+
+            result[device_id] = parsed
+
         return result
+
+    @staticmethod
+    def _format_version(value: Any) -> str | None:
+        """Render a signature field as a string, or None when unknown.
+
+        ``softVersion`` arrives as {"major": 2, "middle": 1, "minor": 0}, while
+        ``hardRev`` and ``model`` are bare numbers. Anything unexpected degrades
+        to None so a surprising payload omits the field rather than raising.
+        """
+        if isinstance(value, dict):
+            parts = [
+                str(value[key])
+                for key in ("major", "middle", "minor")
+                if value.get(key) is not None
+            ]
+            return ".".join(parts) or None
+        if isinstance(value, (int, float, str)):
+            return str(value) or None
+        return None
+
+    @classmethod
+    def _parse_signature(cls, raw: dict[str, Any]) -> dict[str, str]:
+        """Extract device-registry metadata from the ``signature`` attribute."""
+        signature = raw.get("signature")
+        if not isinstance(signature, dict):
+            return {}
+
+        fields = {
+            "signature_model": cls._format_version(signature.get("model")),
+            "sw_version": cls._format_version(signature.get("softVersion")),
+            "hw_version": cls._format_version(signature.get("hardRev")),
+        }
+        return {key: value for key, value in fields.items() if value is not None}
+
+    @staticmethod
+    def _parse_rssi(raw: dict[str, Any]) -> int | None:
+        """Wi-Fi signal in dBm, or None when the device did not report it."""
+        value = raw.get("wifiRssi")
+        if isinstance(value, dict):
+            value = value.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return int(value)
 
     async def get_all_thermostats(self) -> list[dict[str, Any]]:
         """Get all thermostats with their current state.

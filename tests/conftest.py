@@ -42,6 +42,7 @@ _HA_MODULES = [
     "homeassistant.exceptions",
     "homeassistant.helpers",
     "homeassistant.helpers.aiohttp_client",
+    "homeassistant.helpers.device_registry",
     "homeassistant.helpers.entity_platform",
     "homeassistant.helpers.update_coordinator",
 ]
@@ -89,8 +90,21 @@ sys.modules["homeassistant.components.binary_sensor"].BinarySensorEntity = (
 sys.modules["homeassistant.components.climate"].ClimateEntity = _ClimateEntity
 sys.modules["homeassistant.components.sensor"].SensorEntity = _SensorEntity
 
+# DeviceInfo is a TypedDict, so plain dict is a faithful runtime stand-in.
+sys.modules["homeassistant.helpers.device_registry"].DeviceInfo = dict
+
+
+class _EntityCategory:
+    """Stub for homeassistant.const.EntityCategory."""
+
+    DIAGNOSTIC = "diagnostic"
+
+
 # HA constants used at runtime (not just type annotations)
 sys.modules["homeassistant.const"].ATTR_TEMPERATURE = "temperature"
+sys.modules["homeassistant.const"].PERCENTAGE = "%"
+sys.modules["homeassistant.const"].SIGNAL_STRENGTH_DECIBELS_MILLIWATT = "dBm"
+sys.modules["homeassistant.const"].EntityCategory = _EntityCategory
 
 # Add the repo root so `custom_components.schluterditraheat` is importable.
 _SRC_DIR = Path(__file__).resolve().parents[1]
