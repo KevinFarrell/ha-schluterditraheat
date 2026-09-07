@@ -10,7 +10,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE
+from homeassistant.const import PERCENTAGE, UnitOfPower
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -29,10 +29,11 @@ async def async_setup_entry(
     """Set up Schluter sensor entities from a config entry."""
     coordinator: SchluterDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    async_add_entities([
-        SchluterHeatingOutputSensor(coordinator, device_id)
-        for device_id in coordinator.data
-    ])
+    entities: list[SensorEntity] = []
+    for device_id in coordinator.data:
+        entities.append(SchluterHeatingOutputSensor(coordinator, device_id))
+        entities.append(SchluterPowerSensor(coordinator, device_id))
+    async_add_entities(entities)
 
 
 class SchluterHeatingOutputSensor(
@@ -68,6 +69,64 @@ class SchluterHeatingOutputSensor(
         """Return the current heating output percentage."""
         thermostat = self.coordinator.data.get(self._device_id, {})
         return thermostat.get("heating_percent", 0)
+
+    @property
+    def available(self) -> bool:
+        """Return True if entity is available."""
+        return self._device_id in self.coordinator.data
+
+
+class SchluterPowerSensor(
+    CoordinatorEntity[SchluterDataUpdateCoordinator], SensorEntity
+):
+    """Instantaneous power draw of a Schluter thermostat's heating load.
+
+    The heating cable is resistive: it switches fully on or fully off, it does
+    not modulate. So the instantaneous draw is the whole connected load whenever
+    the thermostat is calling for heat, and zero otherwise -- not the load scaled
+    by the output percentage.
+
+    ``outputPercentDisplay`` is the duty cycle *target* for the current PWM
+    window, not a live power level: it reads 0 through the off phase of each
+    cycle and the target percentage while the cable conducts. Multiplying the
+    load by it therefore understates the real draw (validated against the cloud's
+    hourly consumption: on/off matched to ~2%, load x percent was off by ~60%).
+    The cloud consumption import, not a time-integral of this sensor, is the
+    authoritative energy figure for the Energy dashboard.
+    """
+
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_has_entity_name = True
+    _attr_name = "Power"
+
+    def __init__(
+        self, coordinator: SchluterDataUpdateCoordinator, device_id: int
+    ) -> None:
+        """Initialize the power sensor."""
+        super().__init__(coordinator)
+        self._device_id = device_id
+
+        thermostat = coordinator.data[device_id]
+        self._attr_unique_id = f"{thermostat['identifier']}_power"
+
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, thermostat["identifier"])},
+            "name": thermostat.get("group_name") or thermostat.get("name"),
+            "manufacturer": thermostat.get("vendor", "Schluter"),
+            "model": thermostat.get("sku", "DITRA-HEAT-E-WiFi"),
+        }
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the current power draw in watts (full load when heating, else 0)."""
+        thermostat = self.coordinator.data.get(self._device_id)
+        if thermostat is None:
+            return None
+        load_watt = thermostat.get("load_watt") or 0
+        heating_percent = thermostat.get("heating_percent") or 0
+        return float(load_watt) if heating_percent > 0 else 0.0
 
     @property
     def available(self) -> bool:

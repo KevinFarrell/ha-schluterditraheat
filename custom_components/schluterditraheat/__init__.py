@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
     UpdateFailed,
@@ -22,12 +24,14 @@ from .api import (
 )
 from .const import (
     DOMAIN,
+    ENERGY_UPDATE_INTERVAL,
     RATE_LIMIT_BACKOFF_FACTOR,
     RATE_LIMIT_INITIAL_BACKOFF,
     RATE_LIMIT_MAX_BACKOFF,
     SCAN_INTERVAL,
     STATIC_REFRESH_INTERVAL_POLLS,
 )
+from .energy import async_update_energy_statistics
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -65,6 +69,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Setup platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Import energy consumption into long-term statistics for the Energy
+    # dashboard. Kept separate from the fast climate poll: an initial backfill
+    # runs in the background, then it refreshes hourly to match the cloud's
+    # hourly consumption buckets. Failures here never affect the config entry.
+    async def _async_update_energy(_now: Any = None) -> None:
+        if not coordinator.data:
+            return
+        try:
+            await async_update_energy_statistics(
+                hass, api, list(coordinator.data.values())
+            )
+        except Exception:  # noqa: BLE001 - energy import must never break setup
+            _LOGGER.exception("Failed to update Schluter energy statistics")
+
+    entry.async_create_background_task(
+        hass, _async_update_energy(), "schluter_energy_initial_import"
+    )
+    entry.async_on_unload(
+        async_track_time_interval(hass, _async_update_energy, ENERGY_UPDATE_INTERVAL)
+    )
 
     return True
 

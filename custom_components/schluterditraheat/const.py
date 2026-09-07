@@ -14,6 +14,9 @@ API_TIMEOUT = 30
 # Update interval
 SCAN_INTERVAL = timedelta(seconds=60)
 
+# Energy statistics refresh interval (matches the cloud's hourly consumption buckets)
+ENERGY_UPDATE_INTERVAL = timedelta(hours=1)
+
 # Static data cache refresh (polls between full refreshes; ~1 hour at 60s interval)
 STATIC_REFRESH_INTERVAL_POLLS = 60
 

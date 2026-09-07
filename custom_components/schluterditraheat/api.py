@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Any
 
 import aiohttp
@@ -246,7 +247,17 @@ class SchluterApi:
             "roomSetpoint",
             "occupancyMode",
             "gfciStatus",
+            # Always returns 0, even at 100% output -- it is not the duty cycle
+            # its name suggests. Kept only because it predates this integration's
+            # power support; nothing parses it.
             "floorSetpointPwm",
+            # Connected heating load per output, in watts. Combined with
+            # outputPercentDisplay this gives the power draw. Not a static
+            # nameplate figure: it drifts a few percent as the cable warms
+            # (measured 276 W idle, 264 W while conducting), so treat it as a
+            # derived measurement rather than a constant.
+            "loadWattOutput1",
+            "loadWattOutput2",
         ]
 
         endpoint = f"/device/{device_id}/attribute?attributes={','.join(attributes)}"
@@ -348,6 +359,8 @@ class SchluterApi:
                 )
                 continue
 
+            _LOGGER.debug("Raw attributes for device %s: %s", device_id, raw)
+
             result[device_id] = {
                 "current_temperature": raw.get(
                     "roomTemperatureDisplay", {}
@@ -359,9 +372,120 @@ class SchluterApi:
                 ).get("percent", 0),
                 "air_floor_mode": raw.get("airFloorMode"),
                 "gfci_status": raw.get("gfciStatus"),
+                "load_watt": self._parse_load_watt(raw),
             }
 
         return result
+
+    @staticmethod
+    def _parse_load_watt(raw: dict[str, Any]) -> int:
+        """Sum the connected load (watts) across both heating outputs.
+
+        A larger floor can be wired as two circuits, one per output, which is
+        why both are summed rather than only reading output 1.
+
+        Summing assumes both outputs run at the same duty cycle, since the API
+        exposes no per-output percentage: the power sensor multiplies this one
+        combined load by a single percentage. That holds for a single thermostat
+        driving both circuits together, but it is an inference from an
+        undocumented API, not something the cloud states, and it is untested —
+        it needs a two-circuit floor to confirm.
+
+        Outputs are returned as bare numbers, but tolerate the ``{"value": n}``
+        wrapper some attributes use. Missing/None outputs count as zero.
+        """
+        def _watts(value: Any) -> float:
+            if isinstance(value, dict):
+                value = value.get("value")
+            return value or 0
+
+        return int(_watts(raw.get("loadWattOutput1")) + _watts(raw.get("loadWattOutput2")))
+
+    async def get_consumption_history(
+        self, device_id: int, granularity: str = "hourly"
+    ) -> dict[str, Any]:
+        """Fetch historical energy consumption for a device.
+
+        ``granularity`` is one of "hourly", "daily", or "monthly". The API
+        returns a rolling window (roughly the last day of hours, month of days,
+        or half-year of months) as ``{"history": [{"date", "period"}, ...]}``.
+
+        Note: the response labels ``unit`` as "watts", but each ``period`` value
+        is the energy consumed during that bucket in *watt-hours*.
+        """
+        if granularity not in ("hourly", "daily", "monthly"):
+            raise ValueError(f"Invalid granularity: {granularity}")
+
+        endpoint = f"/device/{device_id}/consumption/{granularity}"
+        data = await self._request("GET", endpoint)
+
+        if isinstance(data, dict) and "error" in data:
+            code = data["error"].get("code", "")
+            raise SchluterApiError(
+                f"get_consumption_history({device_id}, {granularity}): {code}"
+            )
+
+        return self._validate_response(
+            data,
+            ["history"],
+            f"get_consumption_history({device_id}, {granularity})",
+        )
+
+    @staticmethod
+    def parse_consumption_history(
+        data: dict[str, Any],
+    ) -> list[tuple[datetime, float]]:
+        """Parse a consumption response into sorted (bucket_start, kWh) pairs.
+
+        ``period`` values are watt-hours per bucket (despite the API's "watts"
+        unit label) and are converted to kWh. Buckets missing a date or period
+        are skipped. Timestamps are timezone-aware UTC on the bucket boundary.
+        """
+        history = data.get("history", []) if isinstance(data, dict) else []
+
+        points: list[tuple[datetime, float]] = []
+        for item in history:
+            date_str = item.get("date")
+            period = item.get("period")
+            if date_str is None or period is None:
+                continue
+            start = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            points.append((start, period / 1000.0))
+
+        points.sort(key=lambda point: point[0])
+        return points
+
+    @staticmethod
+    def build_energy_statistics(
+        points: list[tuple[datetime, float]],
+        last_start: datetime | None = None,
+        last_sum: float = 0.0,
+        last_state: float = 0.0,
+    ) -> list[dict[str, Any]]:
+        """Build cumulative statistics rows from per-bucket energy points.
+
+        Returns a list of ``{"start", "state", "sum"}`` dicts suitable for
+        Home Assistant's external statistics. ``sum`` is the running cumulative
+        total across all buckets; ``state`` is the individual bucket's energy.
+
+        When ``last_start`` is given (the most recently recorded bucket), rows
+        from that bucket onward are re-emitted so a bucket that was still partial
+        at the previous import is corrected, while cumulative continuity with the
+        prior ``last_sum`` is preserved.
+        """
+        if last_start is not None:
+            running = last_sum - last_state
+            selected = [p for p in points if p[0] >= last_start]
+        else:
+            running = 0.0
+            selected = points
+
+        rows: list[dict[str, Any]] = []
+        for start, kwh in selected:
+            running += kwh
+            rows.append({"start": start, "state": kwh, "sum": running})
+
+        return rows
 
     async def get_all_thermostats(self) -> list[dict[str, Any]]:
         """Get all thermostats with their current state.

@@ -1,4 +1,6 @@
 """Unit tests for Schluter API client."""
+from datetime import datetime, timezone
+
 import pytest
 from aiohttp import ClientSession
 from aioresponses import aioresponses
@@ -650,3 +652,164 @@ class TestSplitFetching:
         assert t["heating_percent"] == 0
         assert t["air_floor_mode"] == "floor"
         assert t["gfci_status"] == "ok"
+
+
+class TestLoadWattParsing:
+    """Test connected-load (watts) parsing from device attributes."""
+
+    async def test_load_watt_sums_both_outputs(self, api_client, mock_aiohttp):
+        """Test load_watt is the sum of both heating outputs."""
+        api_client._session_id = "test_session"
+        _mock_attributes(
+            mock_aiohttp,
+            device_id=40001,
+            loadWattOutput1=264,
+            loadWattOutput2=100,
+        )
+
+        result = await api_client.get_device_attributes_bulk([40001])
+
+        assert result[40001]["load_watt"] == 364
+
+    async def test_load_watt_defaults_to_zero_when_absent(
+        self, api_client, mock_aiohttp
+    ):
+        """Test load_watt is 0 when the outputs are missing from the response."""
+        api_client._session_id = "test_session"
+        _mock_attributes(mock_aiohttp, device_id=40001)
+
+        result = await api_client.get_device_attributes_bulk([40001])
+
+        assert result[40001]["load_watt"] == 0
+
+    def test_parse_load_watt_tolerates_value_wrapper_and_none(self):
+        """Test _parse_load_watt handles {'value': n} wrappers and None."""
+        assert SchluterApi._parse_load_watt(
+            {"loadWattOutput1": {"value": 264}, "loadWattOutput2": None}
+        ) == 264
+        assert SchluterApi._parse_load_watt({}) == 0
+
+
+class TestConsumptionHistory:
+    """Test energy consumption history fetching and parsing."""
+
+    async def test_get_consumption_history_success(self, api_client, mock_aiohttp):
+        """Test fetching hourly consumption history."""
+        api_client._session_id = "test_session"
+        mock_aiohttp.get(
+            f"{API_BASE_URL}/device/40001/consumption/hourly",
+            payload={
+                "deviceId": 40001,
+                "unit": "watts",
+                "history": [
+                    {"date": "2026-07-11T00:00:00.000Z", "period": 194},
+                    {"date": "2026-07-11T01:00:00.000Z", "period": 188},
+                ],
+            },
+            status=200,
+        )
+
+        data = await api_client.get_consumption_history(40001, "hourly")
+
+        assert len(data["history"]) == 2
+
+    async def test_get_consumption_history_error_code(self, api_client, mock_aiohttp):
+        """Test that an API error code raises SchluterApiError."""
+        api_client._session_id = "test_session"
+        mock_aiohttp.get(
+            f"{API_BASE_URL}/device/40001/energy/hourly",
+            payload={"error": {"code": "SVCINVREQ"}},
+            status=200,
+        )
+
+        # consumption endpoint returns an error envelope
+        mock_aiohttp.get(
+            f"{API_BASE_URL}/device/40001/consumption/hourly",
+            payload={"error": {"code": "SVCINVREQ"}},
+            status=200,
+        )
+
+        with pytest.raises(SchluterApiError, match="SVCINVREQ"):
+            await api_client.get_consumption_history(40001, "hourly")
+
+    async def test_get_consumption_history_invalid_granularity(self, api_client):
+        """Test that an invalid granularity raises ValueError."""
+        with pytest.raises(ValueError):
+            await api_client.get_consumption_history(40001, "yearly")
+
+    def test_parse_consumption_history_converts_wh_to_kwh(self):
+        """Test period watt-hours are converted to kWh and sorted."""
+        data = {
+            "unit": "watts",
+            "history": [
+                {"date": "2026-07-11T01:00:00.000Z", "period": 500},
+                {"date": "2026-07-11T00:00:00.000Z", "period": 1000},
+            ],
+        }
+
+        points = SchluterApi.parse_consumption_history(data)
+
+        assert points[0][0] == datetime(2026, 7, 11, 0, 0, tzinfo=timezone.utc)
+        assert points[0][1] == 1.0  # 1000 Wh -> 1 kWh
+        assert points[1][1] == 0.5  # 500 Wh -> 0.5 kWh
+
+    def test_parse_consumption_history_skips_incomplete_buckets(self):
+        """Test buckets missing a date or period are skipped."""
+        data = {
+            "history": [
+                {"date": "2026-07-11T00:00:00.000Z", "period": 100},
+                {"date": None, "period": 200},
+                {"date": "2026-07-11T02:00:00.000Z"},
+            ],
+        }
+
+        points = SchluterApi.parse_consumption_history(data)
+
+        assert len(points) == 1
+
+
+class TestBuildEnergyStatistics:
+    """Test cumulative statistics construction."""
+
+    def _points(self):
+        return [
+            (datetime(2026, 7, 11, 0, tzinfo=timezone.utc), 1.0),
+            (datetime(2026, 7, 11, 1, tzinfo=timezone.utc), 0.5),
+            (datetime(2026, 7, 11, 2, tzinfo=timezone.utc), 2.0),
+        ]
+
+    def test_first_import_accumulates_from_zero(self):
+        """Test the sum runs cumulatively from zero on a first import."""
+        rows = SchluterApi.build_energy_statistics(self._points())
+
+        assert [r["sum"] for r in rows] == [1.0, 1.5, 3.5]
+        assert [r["state"] for r in rows] == [1.0, 0.5, 2.0]
+
+    def test_incremental_import_continues_from_last_sum(self):
+        """Test only new buckets are appended, continuing the prior sum."""
+        last_start = datetime(2026, 7, 11, 1, tzinfo=timezone.utc)
+        rows = SchluterApi.build_energy_statistics(
+            self._points(),
+            last_start=last_start,
+            last_sum=10.0,   # cumulative total through the 01:00 bucket
+            last_state=0.5,  # the 01:00 bucket's own energy
+        )
+
+        # Re-emits the 01:00 bucket (correcting it) then appends 02:00.
+        assert rows[0]["start"] == last_start
+        assert rows[0]["sum"] == 10.0   # (10.0 - 0.5) + 0.5
+        assert rows[1]["start"] == datetime(2026, 7, 11, 2, tzinfo=timezone.utc)
+        assert rows[1]["sum"] == 12.0   # 10.0 + 2.0
+
+    def test_no_new_buckets_reemits_only_last(self):
+        """Test a window with nothing newer re-emits just the last bucket."""
+        last_start = datetime(2026, 7, 11, 2, tzinfo=timezone.utc)
+        rows = SchluterApi.build_energy_statistics(
+            self._points(),
+            last_start=last_start,
+            last_sum=3.5,
+            last_state=2.0,
+        )
+
+        assert len(rows) == 1
+        assert rows[0]["sum"] == 3.5
