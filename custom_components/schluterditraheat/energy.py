@@ -27,6 +27,18 @@ from homeassistant.util import dt as dt_util
 from .api import SchluterApi, SchluterApiError
 from .const import DOMAIN
 
+# ``StatisticMeanType`` only exists from Home Assistant 2025.4, and the manifest
+# declares 2024.1.0 as the minimum, so import it defensively rather than raising
+# that floor. Older cores fall back to ``has_mean``; newer ones warn when
+# ``mean_type`` is missing and stop accepting its absence in Home Assistant
+# 2026.11.
+try:
+    from homeassistant.components.recorder.models import StatisticMeanType
+
+    _MEAN_TYPE_NONE: Any | None = StatisticMeanType.NONE
+except ImportError:  # Home Assistant < 2025.4
+    _MEAN_TYPE_NONE = None
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -99,7 +111,7 @@ async def async_update_energy_statistics(
         if not rows:
             continue
 
-        metadata = {
+        metadata: dict[str, Any] = {
             "has_mean": False,
             "has_sum": True,
             "name": f"{name} Energy",
@@ -107,6 +119,9 @@ async def async_update_energy_statistics(
             "statistic_id": statistic_id,
             "unit_of_measurement": UnitOfEnergy.KILO_WATT_HOUR,
         }
+        if _MEAN_TYPE_NONE is not None:
+            # ``has_mean`` is False, so the equivalent mean type is NONE.
+            metadata["mean_type"] = _MEAN_TYPE_NONE
         async_add_external_statistics(hass, metadata, rows)
         _LOGGER.debug(
             "Imported %d energy statistics rows for %s (%s)",
