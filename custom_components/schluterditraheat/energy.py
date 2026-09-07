@@ -117,6 +117,9 @@ async def async_update_energy_statistics(
             "name": f"{name} Energy",
             "source": DOMAIN,
             "statistic_id": statistic_id,
+            # ``EnergyConverter.UNIT_CLASS``; a plain string, so spell the
+            # literal rather than importing the converter for one constant.
+            "unit_class": "energy",
             "unit_of_measurement": UnitOfEnergy.KILO_WATT_HOUR,
         }
         if _MEAN_TYPE_NONE is not None:
