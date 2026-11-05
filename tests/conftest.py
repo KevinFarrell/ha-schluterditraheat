@@ -15,6 +15,17 @@ class _ConfigEntryAuthFailed(Exception):
     """Stub for homeassistant.exceptions.ConfigEntryAuthFailed."""
 
 
+class _ConfigEntryNotReady(Exception):
+    """Stub for homeassistant.exceptions.ConfigEntryNotReady."""
+
+
+class _ConfigFlow:
+    """Allow testing config flows without installing Home Assistant."""
+
+    def __init_subclass__(cls, *, domain=None, **kwargs):
+        super().__init_subclass__(**kwargs)
+
+
 # Minimal DataUpdateCoordinator stub — just enough for our coordinator to
 # inherit from it and have __init__ set the attributes we rely on.
 class _DataUpdateCoordinator:
@@ -39,6 +50,7 @@ _HA_MODULES = [
     "homeassistant.config_entries",
     "homeassistant.const",
     "homeassistant.core",
+    "homeassistant.data_entry_flow",
     "homeassistant.exceptions",
     "homeassistant.helpers",
     "homeassistant.helpers.aiohttp_client",
@@ -81,6 +93,9 @@ sys.modules["homeassistant.helpers.update_coordinator"].CoordinatorEntity = (
 )
 sys.modules["homeassistant.helpers.update_coordinator"].UpdateFailed = _UpdateFailed
 sys.modules["homeassistant.exceptions"].ConfigEntryAuthFailed = _ConfigEntryAuthFailed
+sys.modules["homeassistant.exceptions"].ConfigEntryNotReady = _ConfigEntryNotReady
+sys.modules["homeassistant.config_entries"].ConfigFlow = _ConfigFlow
+sys.modules["homeassistant"].config_entries = sys.modules["homeassistant.config_entries"]
 
 # Entity base classes
 sys.modules["homeassistant.components.binary_sensor"].BinarySensorEntity = (
@@ -91,6 +106,8 @@ sys.modules["homeassistant.components.sensor"].SensorEntity = _SensorEntity
 
 # HA constants used at runtime (not just type annotations)
 sys.modules["homeassistant.const"].ATTR_TEMPERATURE = "temperature"
+sys.modules["homeassistant.const"].CONF_USERNAME = "username"
+sys.modules["homeassistant.const"].CONF_PASSWORD = "password"
 
 # Add the repo root so `custom_components.schluterditraheat` is importable.
 _SRC_DIR = Path(__file__).resolve().parents[1]

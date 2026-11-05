@@ -37,6 +37,14 @@ Enter your [schluterditraheat.com](https://schluterditraheat.com) account creden
 
 **Note:** Adding or removing thermostats from your Schluter account requires reloading the integration in Home Assistant.
 
+The integration saves and reuses its cloud session across reloads and restarts.
+Session state is stored in Home Assistant's private configuration alongside the
+account credentials. Expired sessions are renewed automatically when possible.
+If the cloud reports too many active sessions, Home Assistant retries setup
+without requesting another password. Sessions left by an older installation may
+still need to expire, or you can free a slot by signing out of the Schluter app
+or web portal.
+
 ## Entities
 
 Each thermostat creates the following entities, grouped under a single device:

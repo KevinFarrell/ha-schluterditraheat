@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import Any
 
 import aiohttp
@@ -25,7 +26,7 @@ class SchluterAuthenticationError(SchluterApiError):
     """Invalid credentials or session expired."""
 
 
-class SchluterSessionLimitError(SchluterAuthenticationError):
+class SchluterSessionLimitError(SchluterApiError):
     """Too many active sessions on the account."""
 
 
@@ -41,6 +42,9 @@ class SchluterApi:
         session: aiohttp.ClientSession,
         username: str,
         password: str,
+        *,
+        session_data: dict[str, Any] | None = None,
+        session_updated: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         """Initialize the API client."""
         self._session = session
@@ -51,6 +55,25 @@ class SchluterApi:
         self._account_id: int | None = None
         self._user_format: dict[str, str] = {}
         self._auth_lock = asyncio.Lock()
+        self._session_updated = session_updated
+        if isinstance(session_data, dict):
+            saved_id = session_data.get("session_id")
+            saved_account = session_data.get("account_id")
+            if isinstance(saved_id, str) and saved_id and isinstance(saved_account, int):
+                self._session_id = saved_id
+                self._account_id = saved_account
+                self._refresh_token = session_data.get("refresh_token")
+                self._user_format = session_data.get("user_format", {})
+
+    @property
+    def session_data(self) -> dict[str, Any]:
+        """Private state saved alongside the config entry's credentials."""
+        return {
+            "session_id": self._session_id,
+            "refresh_token": self._refresh_token,
+            "account_id": self._account_id,
+            "user_format": self._user_format,
+        }
 
     async def authenticate(self) -> None:
         """Authenticate with the Schluter API."""
@@ -82,6 +105,10 @@ class SchluterApi:
 
                     if "error" in data:
                         error_code = data["error"].get("code", "")
+                        if error_code == "USRBADLOGIN":
+                            raise SchluterAuthenticationError("Invalid username or password")
+                        if error_code == "ACCRATELIMIT":
+                            raise SchluterRateLimitError("Rate limit exceeded")
                         if error_code == "ACCSESSEXC":
                             raise SchluterSessionLimitError(
                                 "Too many active sessions. Log out of the "
@@ -97,6 +124,9 @@ class SchluterApi:
                     if not self._session_id or not self._account_id:
                         raise SchluterApiError("Missing session ID or account ID in response")
 
+                    if self._session_updated is not None:
+                        self._session_updated(self.session_data)
+
                     _LOGGER.debug(
                         "Authenticated successfully, account_id=%s, temp_unit=%s",
                         self._account_id,
@@ -108,20 +138,17 @@ class SchluterApi:
         except aiohttp.ClientError as err:
             raise SchluterConnectionError(f"Connection error: {err}") from err
 
-    async def _reauthenticate(self) -> None:
+    async def _reauthenticate(self, expired_session: str) -> None:
         """Re-authenticate after session expiry.
 
         Acquires an auth lock to prevent concurrent re-authentication from
         multiple simultaneous 401 responses.
         """
         async with self._auth_lock:
+            if self._session_id != expired_session:
+                return
             _LOGGER.debug("Session expired, re-authenticating")
-            try:
-                await self.authenticate()
-            except SchluterApiError as err:
-                raise SchluterAuthenticationError(
-                    "Re-authentication failed after session expiry"
-                ) from err
+            await self.authenticate()
 
     async def _request(
         self,
@@ -144,15 +171,17 @@ class SchluterApi:
             kwargs = dict(kwargs)
 
         url = f"{API_BASE_URL}{endpoint}"
+        request_session = self._session_id
 
         # Add session to both Cookie header and session-id header
-        headers = kwargs.pop("headers", {})
-        headers["session-id"] = self._session_id
+        headers = dict(kwargs.pop("headers", {}))
+        retry_kwargs = {**kwargs, "headers": dict(headers)}
+        headers["session-id"] = request_session
         headers["Content-Type"] = "application/json"
 
         # Add session to cookies
         cookies = {
-            "session": self._session_id,
+            "session": request_session,
         }
         if self._refresh_token:
             cookies["refreshToken"] = self._refresh_token
@@ -164,9 +193,9 @@ class SchluterApi:
                 ) as resp:
                     if resp.status in (401, 403):
                         if _retry_auth:
-                            await self._reauthenticate()
+                            await self._reauthenticate(request_session)
                             return await self._request(
-                                method, endpoint, _retry_auth=False, **kwargs
+                                method, endpoint, _retry_auth=False, **retry_kwargs
                             )
                         raise SchluterAuthenticationError("Session expired or invalid")
                     if resp.status == 429:
@@ -175,7 +204,20 @@ class SchluterApi:
                         text = await resp.text()
                         raise SchluterApiError(f"Request failed: {resp.status} - {text}")
 
-                    return await resp.json()
+                    data = await resp.json()
+                    if isinstance(data, dict) and "error" in data:
+                        code = data["error"].get("code", "")
+                        if code == "USRSESSEXP":
+                            if _retry_auth:
+                                await self._reauthenticate(request_session)
+                                return await self._request(
+                                    method, endpoint, _retry_auth=False, **retry_kwargs
+                                )
+                            raise SchluterAuthenticationError("Session expired or invalid")
+                        if code == "ACCRATELIMIT":
+                            raise SchluterRateLimitError("Rate limit exceeded")
+                        raise SchluterApiError(f"Request error: {code}")
+                    return data
 
         except asyncio.TimeoutError as err:
             raise SchluterConnectionError("Connection timeout") from err
@@ -340,8 +382,12 @@ class SchluterApi:
         for device_id in device_ids:
             try:
                 raw = await self.get_device_attributes(device_id)
-            except SchluterRateLimitError:
-                raise  # propagate to coordinator for backoff
+            except (
+                SchluterRateLimitError,
+                SchluterAuthenticationError,
+                SchluterSessionLimitError,
+            ):
+                raise  # Let the coordinator handle backoff or authentication.
             except SchluterApiError as err:
                 _LOGGER.error(
                     "Failed to get attributes for device %s: %s", device_id, err
@@ -395,6 +441,8 @@ class SchluterApi:
             self._session_id = None
             self._refresh_token = None
             self._account_id = None
+            if self._session_updated is not None:
+                self._session_updated(self.session_data)
 
     @property
     def is_authenticated(self) -> bool:

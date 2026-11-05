@@ -1,4 +1,7 @@
 """Unit tests for Schluter API client."""
+import asyncio
+from unittest.mock import AsyncMock, Mock
+
 import pytest
 from aiohttp import ClientSession
 from aioresponses import aioresponses
@@ -8,6 +11,7 @@ from custom_components.schluterditraheat.api import (
     SchluterApiError,
     SchluterAuthenticationError,
     SchluterConnectionError,
+    SchluterRateLimitError,
     SchluterSessionLimitError,
 )
 from custom_components.schluterditraheat.const import API_BASE_URL
@@ -99,16 +103,17 @@ class TestSessionLimit:
         with pytest.raises(SchluterSessionLimitError, match="Too many active sessions"):
             await api_client.authenticate()
 
-    async def test_session_limit_is_authentication_error(self, api_client, mock_aiohttp):
-        """Test that SchluterSessionLimitError is catchable as SchluterAuthenticationError."""
+    async def test_session_limit_is_temporary_api_error(self, api_client, mock_aiohttp):
+        """A full session list must not request a different password."""
         mock_aiohttp.post(
             f"{API_BASE_URL}/login",
             payload={"error": {"code": "ACCSESSEXC", "data": {"count": 3}}},
             status=200,
         )
 
-        with pytest.raises(SchluterAuthenticationError):
+        with pytest.raises(SchluterSessionLimitError) as error:
             await api_client.authenticate()
+        assert not isinstance(error.value, SchluterAuthenticationError)
 
     async def test_unknown_login_error_raises_api_error(self, api_client, mock_aiohttp):
         """Test that an unrecognized error code raises SchluterApiError."""
@@ -401,7 +406,7 @@ class TestRetryOnAuth:
             status=401,
         )
 
-        with pytest.raises(SchluterAuthenticationError, match="Re-authentication failed"):
+        with pytest.raises(SchluterAuthenticationError, match="Invalid username or password"):
             await api_client.get_locations()
 
     async def test_no_infinite_retry_loop(self, api_client, mock_aiohttp):
@@ -650,3 +655,131 @@ class TestSplitFetching:
         assert t["heating_percent"] == 0
         assert t["air_floor_mode"] == "floor"
         assert t["gfci_status"] == "ok"
+
+
+class TestSavedSessions:
+    """Persist sessions and avoid additional logins when one is reusable."""
+
+    async def test_restored_session_fetches_without_login(self, mock_aiohttp):
+        saved = {
+            "session_id": "saved_session", "account_id": 10001,
+            "refresh_token": "saved_refresh", "user_format": {"temperature": "c"},
+        }
+        async with ClientSession() as session:
+            api = SchluterApi(session, "test@example.com", "dummy", session_data=saved)
+            mock_aiohttp.get(f"{API_BASE_URL}/locations?account$id=10001",
+                             payload=[{"id": 30001, "name": "Home"}])
+            assert api.temperature_unit == "c"
+            assert await api.get_locations() == [{"id": 30001, "name": "Home"}]
+            assert len(mock_aiohttp.requests) == 1
+            request = next(iter(mock_aiohttp.requests.values()))[0]
+            assert request.kwargs["headers"]["session-id"] == "saved_session"
+
+    async def test_successful_login_saves_reusable_state(self, mock_aiohttp):
+        save = Mock()
+        async with ClientSession() as session:
+            api = SchluterApi(session, "test@example.com", "dummy", session_updated=save)
+            mock_aiohttp.post(f"{API_BASE_URL}/login", payload={
+                "session": "new_session", "account": {"id": 10001},
+                "refreshToken": "refresh", "user": {"format": {"temperature": "f"}},
+            })
+            await api.authenticate()
+            save.assert_called_once_with(api.session_data)
+            restored = SchluterApi(session, "test@example.com", "dummy",
+                                   session_data=save.call_args.args[0])
+            assert restored.is_authenticated
+            assert restored.session_data == api.session_data
+
+    @pytest.mark.parametrize("saved", [None, [], {}, {"session_id": "missing_account"}])
+    async def test_invalid_saved_session_is_ignored(self, saved):
+        async with ClientSession() as session:
+            api = SchluterApi(session, "test@example.com", "dummy", session_data=saved)
+            assert not api.is_authenticated
+
+    async def test_concurrent_expiry_logs_in_only_once(self, api_client, mock_aiohttp):
+        api_client._session_id = "old_session"
+        mock_aiohttp.post(f"{API_BASE_URL}/login", payload={
+            "session": "new_session", "account": {"id": 10001},
+        })
+        await asyncio.gather(*(api_client._reauthenticate("old_session") for _ in range(4)))
+        assert len(next(iter(mock_aiohttp.requests.values()))) == 1
+
+    async def test_http_200_expiry_reauthenticates(self, api_client, mock_aiohttp):
+        api_client._session_id = "old_session"
+        api_client._account_id = 10001
+        mock_aiohttp.get(f"{API_BASE_URL}/locations?account$id=10001",
+                         payload={"error": {"code": "USRSESSEXP"}})
+        mock_aiohttp.post(f"{API_BASE_URL}/login", payload={
+            "session": "new_session", "account": {"id": 10001},
+        })
+        mock_aiohttp.get(f"{API_BASE_URL}/locations?account$id=10001",
+                         payload=[{"id": 30001, "name": "Home"}])
+        assert await api_client.get_locations() == [{"id": 30001, "name": "Home"}]
+        assert api_client._session_id == "new_session"
+
+    async def test_http_200_expiry_does_not_retry_forever(self, api_client, mock_aiohttp):
+        api_client._session_id = "old_session"
+        api_client._account_id = 10001
+        mock_aiohttp.get(f"{API_BASE_URL}/locations?account$id=10001",
+                         payload={"error": {"code": "USRSESSEXP"}}, repeat=True)
+        mock_aiohttp.post(f"{API_BASE_URL}/login", payload={
+            "session": "new_session", "account": {"id": 10001},
+        })
+        with pytest.raises(SchluterAuthenticationError):
+            await api_client.get_locations()
+        calls = [(key[0], call) for key, calls in mock_aiohttp.requests.items() for call in calls]
+        assert len(calls) == 3
+        assert sum(method == "POST" for method, _ in calls) == 1
+
+    @pytest.mark.parametrize("http_status", [200, 401])
+    async def test_session_limit_during_refresh_remains_temporary(self, api_client, mock_aiohttp, http_status):
+        api_client._session_id = "old_session"
+        api_client._account_id = 10001
+        mock_aiohttp.get(f"{API_BASE_URL}/locations?account$id=10001", status=http_status,
+                         payload={"error": {"code": "USRSESSEXP"}})
+        mock_aiohttp.post(f"{API_BASE_URL}/login", payload={"error": {"code": "ACCSESSEXC"}})
+        with pytest.raises(SchluterSessionLimitError):
+            await api_client.get_locations()
+
+    @pytest.mark.parametrize("error_type", [SchluterSessionLimitError, SchluterAuthenticationError])
+    async def test_bulk_does_not_swallow_auth_failures(self, api_client, error_type):
+        api_client.get_device_attributes = AsyncMock(side_effect=error_type("failed"))
+        with pytest.raises(error_type):
+            await api_client.get_device_attributes_bulk([40001])
+
+    async def test_logout_clears_persisted_session(self, api_client, mock_aiohttp):
+        save = Mock()
+        api_client._session_updated = save
+        api_client._session_id = "old_session"
+        mock_aiohttp.get(f"{API_BASE_URL}/logout", payload={"success": True})
+        await api_client.logout()
+        assert save.call_args.args[0]["session_id"] is None
+
+    async def test_login_error_code_identifies_bad_credentials(self, api_client, mock_aiohttp):
+        mock_aiohttp.post(f"{API_BASE_URL}/login", payload={"error": {"code": "USRBADLOGIN"}})
+        with pytest.raises(SchluterAuthenticationError):
+            await api_client.authenticate()
+
+    async def test_retry_keeps_caller_headers(self, api_client, mock_aiohttp):
+        api_client._session_id = "old_session"
+        mock_aiohttp.get(f"{API_BASE_URL}/example", status=401)
+        mock_aiohttp.post(f"{API_BASE_URL}/login", payload={
+            "session": "new_session", "account": {"id": 10001},
+        })
+        mock_aiohttp.get(f"{API_BASE_URL}/example", payload={})
+        headers = {"custom": "value"}
+        await api_client._request("GET", "/example", headers=headers)
+        requests = [call for key, calls in mock_aiohttp.requests.items()
+                    if key[0] == "GET" for call in calls]
+        assert requests[-1].kwargs["headers"]["custom"] == "value"
+        assert requests[-1].kwargs["headers"]["session-id"] == "new_session"
+        assert headers == {"custom": "value"}
+
+    @pytest.mark.parametrize("error_type", [SchluterConnectionError, SchluterRateLimitError])
+    async def test_temporary_refresh_failure_is_not_invalid_auth(self, api_client, mock_aiohttp, error_type):
+        api_client._session_id = "old_session"
+        api_client._account_id = 10001
+        mock_aiohttp.get(f"{API_BASE_URL}/locations?account$id=10001", status=401)
+        api_client.authenticate = AsyncMock(side_effect=error_type("offline"))
+        with pytest.raises(error_type):
+            await api_client.get_locations()
