@@ -6,7 +6,7 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
@@ -38,20 +38,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Schluter DITRA-HEAT from a config entry."""
     # Create API client
     session = async_get_clientsession(hass)
+
+    def save_session(data: dict) -> None:
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, "session_data": data}
+        )
+
     api = SchluterApi(
         session,
         entry.data[CONF_USERNAME],
         entry.data[CONF_PASSWORD],
+        session_data=entry.data.get("session_data"),
+        session_updated=save_session,
     )
 
     # Authenticate
     try:
-        await api.authenticate()
+        if not api.is_authenticated:
+            await api.authenticate()
     except SchluterAuthenticationError as err:
         raise ConfigEntryAuthFailed(f"Authentication failed: {err}") from err
-    except SchluterConnectionError as err:
-        _LOGGER.error("Failed to connect to Schluter API: %s", err)
-        return False
+    except SchluterApiError as err:
+        raise ConfigEntryNotReady(str(err)) from err
 
     # Create coordinator
     coordinator = SchluterDataUpdateCoordinator(hass, api)

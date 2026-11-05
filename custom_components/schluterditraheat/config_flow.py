@@ -47,6 +47,7 @@ async def validate_credentials(
     return {
         "account_id": api.account_id,
         "temperature_unit": api.temperature_unit,
+        "session_data": api.session_data,
     }
 
 
@@ -66,6 +67,8 @@ class SchluterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            await self.async_set_unique_id(user_input[CONF_USERNAME].lower())
+            self._abort_if_unique_id_configured()
             try:
                 # Validate credentials
                 info = await validate_credentials(
@@ -74,16 +77,13 @@ class SchluterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     user_input[CONF_PASSWORD],
                 )
 
-                # Check if already configured
-                await self.async_set_unique_id(user_input[CONF_USERNAME].lower())
-                self._abort_if_unique_id_configured()
-
                 # Create entry
                 return self.async_create_entry(
                     title=user_input[CONF_USERNAME],
                     data={
                         CONF_USERNAME: user_input[CONF_USERNAME],
                         CONF_PASSWORD: user_input[CONF_PASSWORD],
+                        "session_data": info["session_data"],
                     },
                 )
 
@@ -127,14 +127,16 @@ class SchluterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             try:
                 # Validate credentials
-                await validate_credentials(self.hass, username, password)
+                info = await validate_credentials(self.hass, username, password)
 
                 # Update entry
                 self.hass.config_entries.async_update_entry(
                     self.reauth_entry,
                     data={
+                        **self.reauth_entry.data,
                         CONF_USERNAME: username,
                         CONF_PASSWORD: password,
+                        "session_data": info["session_data"],
                     },
                 )
 
